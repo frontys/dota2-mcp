@@ -84,7 +84,12 @@ class Handler(BaseHTTPRequestHandler):
                 with open(STATE_FILE, "w", encoding="utf-8") as f:
                     json.dump(payload, f, ensure_ascii=False)
                 _last_seen["ts"] = payload["_received_at"]
-            self._send(200, {"ok": True})
+            # Автономное голосовое сопровождение Voice Coach
+            try:
+                import voice_coach
+                voice_coach.coach.process_gsi_packet(payload)
+            except Exception:
+                pass
 
             # Реактивное оповещение C# WPF оверлея по Named Pipe (<1 мс)
             try:
@@ -96,6 +101,8 @@ class Handler(BaseHTTPRequestHandler):
                     srv.broadcast(D.get_board())
             except Exception:
                 pass
+
+            self._send(200, {"ok": True})
         except Exception as e:
             self._send(500, {"ok": False, "error": str(e)})
 
