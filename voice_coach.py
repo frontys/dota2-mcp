@@ -274,7 +274,7 @@ class CuteVoiceCoach:
         fmt_start = f"{t_start // 60:02d}:{t_start % 60:02d}"
         fmt_end = f"{t_end // 60:02d}:{t_end % 60:02d}"
         text = f"Roshan is down. Respawn window from {fmt_start} to {fmt_end}."
-        self.speak_or_play(event_key, text, "roshan_respawn.mp3")
+        self.speak_or_play(event_key, text, "roshan_killed.mp3")
         return event_key
 
     def check_timers(self, clock_time: int, is_in_game: bool = True) -> str | None:
@@ -326,7 +326,7 @@ class CuteVoiceCoach:
             sec_in_min = c % 60
             if 46 <= sec_in_min <= 50:
                 key = f"stack_min_{minute}"
-                if self.speak_or_play(key, "Stack jungle camps now at 53 seconds."):
+                if self.speak_or_play(key, "Stack jungle camps now at 53 seconds.", "stack_53s.mp3"):
                     triggered_cue = key
 
         # ---------------------------------------------------------
@@ -343,7 +343,7 @@ class CuteVoiceCoach:
             for tier, t_unlock, phrase in neutral_tiers:
                 if t_unlock <= c <= t_unlock + 5:
                     key = f"neutral_tier_{tier}"
-                    if self.speak_or_play(key, phrase):
+                    if self.speak_or_play(key, phrase, f"neutral_tier{tier}.mp3"):
                         triggered_cue = key
                         break
 
@@ -359,19 +359,19 @@ class CuteVoiceCoach:
             # 15s warning before window opens
             if (w_start - 16) <= c <= (w_start - 14):
                 key = f"rosh_pre_window_{t_death}"
-                if self.speak_or_play(key, "Roshan respawn window opens in 15 seconds."):
+                if self.speak_or_play(key, "Roshan respawn window opens in 15 seconds.", "roshan_window_warning.mp3"):
                     triggered_cue = key
 
             # Respawn window is now open (8:00)
             elif w_start <= c <= (w_start + 5):
                 key = f"rosh_window_open_{t_death}"
-                if self.speak_or_play(key, "Roshan respawn window is open! Roshan may spawn now.", "roshan_respawn.mp3"):
+                if self.speak_or_play(key, "Roshan respawn window is open! Roshan may spawn now.", "roshan_window_open.mp3"):
                     triggered_cue = key
 
             # Maximum respawn time reached (11:00 guaranteed)
             elif w_end <= c <= (w_end + 5):
                 key = f"rosh_respawn_guaranteed_{t_death}"
-                if self.speak_or_play(key, "Roshan has guaranteed respawned!"):
+                if self.speak_or_play(key, "Roshan has guaranteed respawned!", "roshan_respawn.mp3"):
                     triggered_cue = key
                     self.roshan_killed_time = None
 
