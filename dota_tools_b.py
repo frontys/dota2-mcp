@@ -1,9 +1,14 @@
 """Инструменты ч.2: матчи, тренер, STRATZ. Stdlib-only."""
+import http.client
 import json
+import logging
 import os
-import urllib.request
 import urllib.error
+import urllib.request
+
 import dota_core as C
+
+logger = logging.getLogger(__name__)
 
 
 def t_recent_matches(limit=10):
@@ -12,11 +17,11 @@ def t_recent_matches(limit=10):
         return {"ok": False, "error": err}
     try:
         limit = max(1, min(int(limit), 30))
-    except Exception:
+    except (TypeError, ValueError):
         limit = 10
-    data, e = C.http_get_json("%s/players/%s/recentMatches" % (C.CFG.get("opendota_base"), acc))
+    data, e = C.http_get_json(f"{C.CFG.get('opendota_base')}/players/{acc}/recentMatches")
     if e:
-        return {"ok": False, "error": "OpenDota: %s" % e}
+        return {"ok": False, "error": f"OpenDota: {e}"}
     return {"ok": True, "матчи": [C.fmt_match(m) for m in (data or [])[:limit]]}
 
 
@@ -34,12 +39,12 @@ def t_hero_stats(hero_id):
     acc, err = C.need_account()
     if err:
         return {"ok": False, "error": err}
-    heroes, e = C.http_get_json("%s/players/%s/heroes" % (C.CFG.get("opendota_base"), acc))
+    heroes, e = C.http_get_json(f"{C.CFG.get('opendota_base')}/players/{acc}/heroes")
     if e:
-        return {"ok": False, "error": "OpenDota: %s" % e}
+        return {"ok": False, "error": f"OpenDota: {e}"}
     try:
         hid = int(hero_id)
-    except Exception:
+    except (TypeError, ValueError):
         return {"ok": False, "error": "hero_id числом"}
     for h in heroes or []:
         if h.get("hero_id") == hid:
@@ -57,7 +62,7 @@ def t_coach_tip(hero=None, minute=None):
             mp = data.get("map") or {}
             try:
                 minute = int(float(mp.get("clock_time", mp.get("game_time", 0))) // 60)
-            except Exception:
+            except (TypeError, ValueError):
                 minute = None
             if hero is None:
                 h = (data.get("hero") or {}).get("name", "")
@@ -68,17 +73,17 @@ def t_coach_tip(hero=None, minute=None):
         pl = data.get("player") or {}
         if pl.get("team_name") == "spectator" or (data.get("hero") or {}).get("id", 1) in (0, None):
             mp = data.get("map") or {}
-            spect_extra.append("Наблюдение: матч %s, счёт %s:%s, время %s, стадия %s." % (
-                mp.get("matchid"), mp.get("radiant_score"), mp.get("dire_score"),
-                mp.get("clock_time", mp.get("game_time")), mp.get("game_state")))
+            spect_extra.append(
+                f"Наблюдение: матч {mp.get('matchid')}, счёт {mp.get('radiant_score')}:{mp.get('dire_score')}, "
+                f"время {mp.get('clock_time', mp.get('game_time'))}, стадия {mp.get('game_state')}."
+            )
             for e in (data.get("events") or [])[-3:]:
                 try:
-                    import json as _j
-                    dd = _j.loads(e.get("data", "{}")) if e.get("event_type") == "generic_event" else {}
+                    dd = json.loads(e.get("data", "{}")) if e.get("event_type") == "generic_event" else {}
                     if dd:
-                        spect_extra.append("Событие: %s (p%s)" % (dd.get("type"), dd.get("playerid1")))
-                except Exception:
-                    pass
+                        spect_extra.append(f"Событие: {dd.get('type')} (p{dd.get('playerid1')})")
+                except (json.JSONDecodeError, TypeError, ValueError, AttributeError) as err:
+                    logger.debug("Failed to parse generic_event: %s", err)
     tips = []
     if minute is not None:
         best = None
@@ -86,12 +91,14 @@ def t_coach_tip(hero=None, minute=None):
             if t.get("min", 0) <= int(minute):
                 best = t
         if best:
-            tips.append("Минута ~%s: %s" % (minute, best["text"]))
+            tips.append(f"Минута ~{minute}: {best['text']}")
     if hero:
         g = (C.COACH.get("item_guides") or {}).get(C.norm_hero(hero))
         if g:
-            tips.append("Закуп %s: старт [%s]; мид [%s]; лейт [%s]." % (
-                hero, ", ".join(g.get("starting", [])), ", ".join(g.get("mid", [])), ", ".join(g.get("late", []))))
+            tips.append(
+                f"Закуп {hero}: старт [{', '.join(g.get('starting', []))}]; "
+                f"мид [{', '.join(g.get('mid', []))}]; лейт [{', '.join(g.get('late', []))}]."
+            )
     if not tips:
         tips = ["Фарми, носи TP, смотри миникарту.", "Варды 2/6 мин, wisdom 7/14 мин, BKB к 25-30 мин."]
     return {"ok": True, "советы": spect_extra + tips}
@@ -114,11 +121,11 @@ def t_live_tick():
         fg = t5.get("золото_в_мин_факт")
         if fg is not None:
             if fg < 250:
-                out["вердикт"] = "Темп низкий (%.0f золота/мин за 5 мин): жмёшься, иди фармить стаки/лес." % fg
+                out["вердикт"] = f"Темп низкий ({fg:.0f} золота/мин за 5 мин): жмёшься, иди фармить стаки/лес."
             elif fg > 550:
-                out["вердикт"] = "Темп отличный (%.0f/мин): дави, забирай вышку/рошана." % fg
-    except Exception:
-        pass
+                out["вердикт"] = f"Темп отличный ({fg:.0f}/мин): дави, забирай вышку/рошана."
+    except (TypeError, ValueError, AttributeError) as e:
+        logger.debug("Failed to evaluate live tempo verdict: %s", e)
     return out
 
 
@@ -134,25 +141,26 @@ def t_spectate_live():
         out["opendota"] = "matchid нет в GSI (меню/лобби). Открой просмотр матча — GSI пришлёт matchid."
         return out
     base = C.CFG.get("opendota_base")
-    live, _ = C.http_get_json("%s/live" % base, timeout=10)
+    live, _ = C.http_get_json(f"{base}/live", timeout=10)
     found = None
     try:
         for m in live or []:
             if str(m.get("match_id")) == str(mid):
                 found = m
                 break
-    except Exception:
-        pass
+    except (AttributeError, TypeError) as e:
+        logger.debug("Failed to scan OpenDota live matches: %s", e)
     if found:
         out["live"] = {"match_id": found.get("match_id"),
-                       "счёт": "%s:%s" % (found.get("radiant_score"), found.get("dire_score")),
+                       "счёт": f"{found.get('radiant_score')}:{found.get('dire_score')}",
                        "время": found.get("game_time"),
                        "лига": (found.get("league") or {}).get("name"),
-                       "игроки": [{"hero": p.get("hero_id"), "kda": "%s/%s/%s" % (p.get("kills"), p.get("deaths"), p.get("assists")),
+                       "игроки": [{"hero": p.get("hero_id"),
+                                   "kda": f"{p.get('kills')}/{p.get('deaths')}/{p.get('assists')}",
                                    "gpm": p.get("gold_per_min"), "xpm": p.get("xp_per_min"),
                                    "net": p.get("gold")} for p in (found.get("players") or [])]}
     else:
-        out["live"] = "матч %s не в топ-live OpenDota (обычно там только про/хай-MMR). GSI-данные выше — основной источник." % mid
+        out["live"] = f"матч {mid} не в топ-live OpenDota (обычно там только про/хай-MMR). GSI-данные выше — основной источник."
     det = t_match_details(mid)
     if det.get("ok"):
         out["разбор_opendota"] = det
@@ -179,7 +187,7 @@ def t_stratz_match(match_id):
         return {"ok": False, "error": "Нужен STRATZ_TOKEN (stratz.com/api)."}
     try:
         mid = int(match_id)
-    except Exception:
+    except (TypeError, ValueError):
         return {"ok": False, "error": "match_id числом"}
     q = "query($id: Long!) { match(id: $id) { id didRadiantWin players { heroId kills deaths assists } } }"
     body = json.dumps({"query": q, "variables": {"id": mid}}).encode("utf-8")
@@ -189,15 +197,15 @@ def t_stratz_match(match_id):
         with urllib.request.urlopen(req, timeout=20) as r:
             data = json.loads(r.read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as e:
-        return {"ok": False, "error": "STRATZ HTTP %d" % e.code}
-    except Exception as e:
-        return {"ok": False, "error": "сеть: %s" % e}
+        return {"ok": False, "error": f"STRATZ HTTP {e.code}"}
+    except (urllib.error.URLError, http.client.HTTPException, OSError, json.JSONDecodeError, ValueError) as e:
+        return {"ok": False, "error": f"сеть: {e}"}
     m = (data.get("data") or {}).get("match")
     if not m:
         return {"ok": False, "error": "матч не найден"}
     return {"ok": True, "match_id": m.get("id"), "победа_radiant": m.get("didRadiantWin"),
             "игроки": [{"hero": p.get("heroId"),
-                        "kda": "%s/%s/%s" % (p.get("kills"), p.get("deaths"), p.get("assists"))}
+                        "kda": f"{p.get('kills')}/{p.get('deaths')}/{p.get('assists')}"}
                        for p in (m.get("players") or [])]}
 
 

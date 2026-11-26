@@ -5,18 +5,18 @@ Hybrid Zero Two Voice Pack Generator for Dota 2 Coach.
 All outputs saved to c:\\AI\\dota2-mcp\\audio_cute\\ in 192kbps MP3 format.
 """
 
+import contextlib
 import os
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+
 from gradio_client import Client, handle_file
 
-try:
+with contextlib.suppress(AttributeError, OSError, ValueError):
     sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
 
 BASE_DIR = Path(r"c:\AI\dota2-mcp")
 AUDIO_DIR = BASE_DIR / "audio_cute"
@@ -106,8 +106,8 @@ def generate_synthesized():
                         "-b:a", "192k",
                         str(target_path),
                     ],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    check=False,
+                    capture_output=True,
                 )
 
                 if temp_wav.exists():
@@ -129,10 +129,10 @@ def main():
     t0 = time.time()
     copy_originals()
     generate_synthesized()
-    print(f"\n=======================================================")
+    print("\n=======================================================")
     print(f"ВСЕ 19 РЕПЛИК УСПЕШНО ГОТОВЫ за {time.time() - t0:.1f} сек!")
     print(f"Папка тренера: {AUDIO_DIR}")
-    print(f"=======================================================")
+    print("=======================================================")
 
 
 if __name__ == "__main__":

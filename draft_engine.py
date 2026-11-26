@@ -2,14 +2,19 @@
 100% бесплатно: OpenDota API + локальный кэш на диске + чистая математика.
 Понимает народный сленг, аббревиатуры и русские названия.
 """
+import contextlib
+import http.client
 import io
 import json
+import logging
 import os
 import re
 import sys
 import time
-import urllib.request
 import urllib.error
+import urllib.request
+
+logger = logging.getLogger(__name__)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASE, "cache")
@@ -38,7 +43,7 @@ ALIASES = {
     "pudge": "Pudge", "пудж": "Pudge", "падж": "Pudge", "бучер": "Pudge", "мясник": "Pudge",
     "razor": "Razor", "разор": "Razor", "рейзор": "Razor", "электрик": "Razor",
     "sk": "Sand King", "ск": "Sand King", "скорпион": "Sand King", "скорп": "Sand King",
-    "storm": "Storm Spirit", "шторм": "Storm Spirit", "панда": "Storm Spirit",
+    "storm": "Storm Spirit", "шторм": "Storm Spirit",
     "sven": "Sven", "свен": "Sven",
     "tiny": "Tiny", "тини": "Tiny", "тинька": "Tiny", "камень": "Tiny",
     "vs": "Vengeful Spirit", "венга": "Vengeful Spirit",
@@ -58,7 +63,7 @@ ALIASES = {
     "sniper": "Sniper", "снайпер": "Sniper", "дед": "Sniper", "кардан": "Sniper",
     "necro": "Necrophos", "некр": "Necrophos", "некрофос": "Necrophos",
     "warlock": "Warlock", "варлок": "Warlock", "голем": "Warlock",
-    "bm": "Beastmaster", "бист": "Beastmaster", "бистмастер": "Beastmaster",
+    "bm": "Beastmaster", "бистмастер": "Beastmaster",
     "qop": "Queen of Pain", "квопа": "Queen of Pain", "акаша": "Queen of Pain",
     "veno": "Venomancer", "веник": "Venomancer", "веномансер": "Venomancer", "сопля": "Venomancer",
     "fv": "Faceless Void", "войд": "Faceless Void", "купол": "Faceless Void",
@@ -90,7 +95,7 @@ ALIASES = {
     "spec": "Spectre", "спектра": "Spectre", "меркуриал": "Spectre",
     "aa": "Ancient Apparition", "аа": "Ancient Apparition", "аппарат": "Ancient Apparition", "сосулька": "Ancient Apparition",
     "doom": "Doom", "дум": "Doom", "люцифер": "Doom",
-    "ursa": "Ursa", "урса": "Ursa", "медведь": "Ursa",
+    "ursa": "Ursa", "урса": "Ursa",
     "sb": "Spirit Breaker", "бара": "Spirit Breaker", "разгон": "Spirit Breaker",
     "gyro": "Gyrocopter", "гиро": "Gyrocopter", "вертолет": "Gyrocopter",
     "alch": "Alchemist", "алхимик": "Alchemist", "алхим": "Alchemist",
@@ -163,8 +168,8 @@ def _http_get(url, timeout=12):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8", "replace")), None
     except urllib.error.HTTPError as e:
-        return None, "HTTP %d" % e.code
-    except Exception as e:
+        return None, f"HTTP {e.code}"
+    except (urllib.error.URLError, http.client.HTTPException, OSError, json.JSONDecodeError, ValueError) as e:
         return None, str(e)
 
 
@@ -173,7 +178,7 @@ def load_heroes():
     try:
         with open(HEROES_FILE, encoding="utf-8") as f:
             return json.load(f) or []
-    except Exception:
+    except (OSError, json.JSONDecodeError, ValueError):
         return []
 
 
@@ -190,18 +195,18 @@ def load_hero_stats():
                 data = json.load(f)
                 if data and time.time() - os.path.getmtime(HERO_STATS_FILE) < 86400 * 3:  # 3 дня
                     return {h["id"]: h for h in data}
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError) as e:
+            logger.debug("Failed to read hero_stats cache: %s", e)
 
     # Качаем свежую
-    data, err = _http_get("https://api.opendota.com/api/heroStats")
+    data, _err = _http_get("https://api.opendota.com/api/heroStats")
     if data:
         try:
             with open(HERO_STATS_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
             return {h["id"]: h for h in data}
-        except Exception:
-            pass
+        except (OSError, TypeError, ValueError, KeyError) as e:
+            logger.debug("Failed to save hero_stats cache: %s", e)
     return {}
 
 
@@ -230,12 +235,10 @@ def resolve_hero(query):
         return None
 
     # 1. По числу ID
-    try:
+    with contextlib.suppress(TypeError, ValueError):
         qid = int(query)
         if qid in HEROES_BY_ID:
             return HEROES_BY_ID[qid]
-    except Exception:
-        pass
 
     q_raw = str(query).strip().lower()
     q_norm = normalize_name(q_raw)
@@ -273,18 +276,18 @@ def resolve_hero(query):
 # ----------------- Загрузка и кэширование матчапов -----------------
 def get_matchups(hero_id):
     """Возвращает список матчапов против hero_id (из кэша или OpenDota)."""
-    cache_path = os.path.join(MATCHUPS_DIR, "%d.json" % hero_id)
+    cache_path = os.path.join(MATCHUPS_DIR, f"{hero_id}.json")
     if os.path.exists(cache_path):
         try:
             # Кэш валиден 5 дней
             if time.time() - os.path.getmtime(cache_path) < 86400 * 5:
                 with open(cache_path, encoding="utf-8") as f:
                     return json.load(f), None
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            logger.debug("Failed to read matchups cache %s: %s", cache_path, e)
 
     # Качаем из OpenDota
-    url = "https://api.opendota.com/api/heroes/%d/matchups" % hero_id
+    url = f"https://api.opendota.com/api/heroes/{hero_id}/matchups"
     data, err = _http_get(url)
     if err:
         # Если есть старый кэш — вернем его
@@ -292,15 +295,15 @@ def get_matchups(hero_id):
             try:
                 with open(cache_path, encoding="utf-8") as f:
                     return json.load(f), None
-            except Exception:
-                pass
+            except (OSError, json.JSONDecodeError, ValueError) as cache_err:
+                logger.debug("Failed to read stale matchups cache %s: %s", cache_path, cache_err)
         return None, err
 
     try:
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
-    except Exception:
-        pass
+    except (OSError, TypeError, ValueError) as e:
+        logger.debug("Failed to write matchups cache %s: %s", cache_path, e)
 
     return data, None
 
@@ -417,7 +420,10 @@ def get_draft_advice(enemies_input):
     if not enemies:
         return {
             "ok": False,
-            "error": "Не удалось распознать героев: %s. Попробуй сленг (сф, ам, па, пудж) или англ. имя." % ", ".join(not_found),
+            "error": (
+                f"Не удалось распознать героев: {', '.join(not_found)}. "
+                "Попробуй сленг (сф, ам, па, пудж) или англ. имя."
+            ),
         }
 
     # Для каждого врага собираем матчапы
@@ -426,7 +432,7 @@ def get_draft_advice(enemies_input):
 
     for e in enemies:
         eid = e["id"]
-        matchups, err = get_matchups(eid)
+        matchups, _err = get_matchups(eid)
         if not matchups:
             continue
 
@@ -497,31 +503,31 @@ def get_draft_advice(enemies_input):
         "not_found": not_found if not_found else None,
         "analysis": {
             "warnings": analysis["warnings"],
-            "recommended_items": sorted(list(analysis["item_counters"])),
+            "recommended_items": sorted(analysis["item_counters"]),
             "stuns_count": analysis["stuns_count"],
         },
         "top_counters": [
             {
                 "hero": c["name"],
                 "role": c["role"],
-                "advantage": ("%+0.2f%%" % c["advantage"]),
-                "winrate": ("%0.1f%%" % c["avg_winrate"]),
+                "advantage": f"{c['advantage']:+.2f}%",
+                "winrate": f"{c['avg_winrate']:.1f}%",
             }
             for c in top_overall
         ],
         "top_cores": [
             {
                 "hero": c["name"],
-                "advantage": ("%+0.2f%%" % c["advantage"]),
-                "winrate": ("%0.1f%%" % c["avg_winrate"]),
+                "advantage": f"{c['advantage']:+.2f}%",
+                "winrate": f"{c['avg_winrate']:.1f}%",
             }
             for c in top_cores
         ],
         "top_supports": [
             {
                 "hero": c["name"],
-                "advantage": ("%+0.2f%%" % c["advantage"]),
-                "winrate": ("%0.1f%%" % c["avg_winrate"]),
+                "advantage": f"{c['advantage']:+.2f}%",
+                "winrate": f"{c['avg_winrate']:.1f}%",
             }
             for c in top_supports
         ],
@@ -533,52 +539,50 @@ def get_draft_advice(enemies_input):
 def fmt_draft_advice(res):
     """Форматирует результат в читаемый текст для CLI и MCP."""
     if not res.get("ok"):
-        return "Ошибка: %s" % res.get("error")
+        return f"Ошибка: {res.get('error')}"
 
     lines = []
-    lines.append("🎯 РАЗБОР ДРАФТА ПРОТИВ: %s" % ", ".join(res["enemies"]))
+    lines.append(f"🎯 РАЗБОР ДРАФТА ПРОТИВ: {', '.join(res['enemies'])}")
     if res.get("not_found"):
-        lines.append("⚠️ Не распознаны: %s" % ", ".join(res["not_found"]))
+        lines.append(f"⚠️ Не распознаны: {', '.join(res['not_found'])}")
 
     lines.append("")
     an = res.get("analysis", {})
     if an.get("warnings"):
         lines.append("⚡ АНАЛИЗ УЯЗВИМОСТЕЙ ВРАГА:")
         for w in an["warnings"]:
-            lines.append("  %s" % w)
+            lines.append(f"  {w}")
         lines.append("")
 
     if an.get("recommended_items"):
         lines.append("🎒 КЛЮЧЕВЫЕ АРТЕФАКТЫ ПРОТИВ ЭТОГО ПИКА:")
         for it in an["recommended_items"]:
-            lines.append("  • %s" % it)
+            lines.append(f"  • {it}")
         lines.append("")
 
     lines.append("👑 ТОП-7 КОНТРПИКОВ (ПО ПРЕИМУЩЕСТВУ В ПАТЧЕ):")
     for i, c in enumerate(res.get("top_counters", []), 1):
-        lines.append("  %d. %-20s [%-14s] Преимущество: %s (Винрейт: %s)" % (
-            i, c["hero"], c["role"], c["advantage"], c["winrate"]
-        ))
+        lines.append(
+            f"  {i}. {c['hero']:<20} [{c['role']:<14}] Преимущество: {c['advantage']} (Винрейт: {c['winrate']})"
+        )
 
     lines.append("")
     if res.get("top_cores"):
         lines.append("⚔️ Лучшие коры (Carry / Mid):")
         for c in res["top_cores"]:
-            lines.append("  • %-18s %s (WR %s)" % (c["hero"], c["advantage"], c["winrate"]))
+            lines.append(f"  • {c['hero']:<18} {c['advantage']} (WR {c['winrate']})")
 
     if res.get("top_supports"):
         lines.append("🛡️ Лучшие саппорты:")
         for c in res["top_supports"]:
-            lines.append("  • %-18s %s (WR %s)" % (c["hero"], c["advantage"], c["winrate"]))
+            lines.append(f"  • {c['hero']:<18} {c['advantage']} (WR {c['winrate']})")
 
     return "\n".join(lines)
 
 
 if __name__ == "__main__":
-    try:
+    with contextlib.suppress(AttributeError, io.UnsupportedOperation, OSError, ValueError):
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    except Exception:
-        pass
 
     args = sys.argv[1:]
     if not args:

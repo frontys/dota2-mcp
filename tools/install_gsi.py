@@ -1,13 +1,8 @@
 """Установка GSI-конфига в найденные копии Dota 2."""
-import io
+import contextlib
 import json
 import os
 import sys
-
-try:
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-except Exception:
-    pass
 
 GSI_CFG = '''"Dota2MCP"
 {
@@ -47,7 +42,7 @@ DEFAULT_INSTALLS = [
 def install_to(dota_root, port=3000):
     cfg_dir = os.path.join(dota_root, "game", "dota", "cfg", "gamestate_integration")
     os.makedirs(cfg_dir, exist_ok=True)
-    text = GSI_CFG.replace("127.0.0.1:3000", "127.0.0.1:%d" % port)
+    text = GSI_CFG.replace("127.0.0.1:3000", f"127.0.0.1:{int(port)}")
     path = os.path.join(cfg_dir, "gamestate_integration_dota2mcp.cfg")
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
@@ -55,17 +50,19 @@ def install_to(dota_root, port=3000):
 
 
 def main():
+    with contextlib.suppress(AttributeError, OSError, ValueError):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     cfg_path = os.path.join(base, "config.json")
     port = 3000
     roots = DEFAULT_INSTALLS
-    try:
-        with open(cfg_path, encoding="utf-8") as f:
-            c = json.load(f)
-            port = int(c.get("gsi_port", 3000))
-            roots = c.get("dota_installs") or roots
-    except Exception:
-        pass
+    with (
+        contextlib.suppress(OSError, json.JSONDecodeError, TypeError, ValueError, AttributeError),
+        open(cfg_path, encoding="utf-8") as f,
+    ):
+        c = json.load(f)
+        port = int(c.get("gsi_port", 3000))
+        roots = c.get("dota_installs") or roots
 
     found = False
     for r in roots:

@@ -2,14 +2,19 @@
 100% бесплатно: OpenDota API + локальный кэш на диске (0 токенов нейросетей).
 """
 import concurrent.futures
+import contextlib
+import http.client
 import io
 import json
+import logging
 import os
 import re
 import sys
 import time
-import urllib.request
 import urllib.error
+import urllib.request
+
+logger = logging.getLogger(__name__)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASE, "cache")
@@ -24,8 +29,8 @@ try:
     with open(HEROES_FILE, encoding="utf-8") as f:
         for h in json.load(f) or []:
             HEROES_MAP[int(h["id"])] = h.get("localized_name", str(h["id"]))
-except Exception:
-    pass
+except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError) as e:
+    logger.debug("Failed to load heroes map: %s", e)
 
 # Список сигнатурных героев бустеров и смурфов
 CHEESE_SMURF_HEROES = {
@@ -71,8 +76,8 @@ def _http_get(url, timeout=10):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8", "replace")), None
     except urllib.error.HTTPError as e:
-        return None, "HTTP %d" % e.code
-    except Exception as e:
+        return None, f"HTTP {e.code}"
+    except (urllib.error.URLError, http.client.HTTPException, OSError, json.JSONDecodeError, ValueError) as e:
         return None, str(e)
 
 
@@ -87,9 +92,9 @@ def format_rank_tier(tier):
         medal = RANK_MEDALS.get(medal_id, "Rank")
         if medal_id == 8:
             return "Immortal"
-        return "%s %d" % (medal, stars)
-    except Exception:
-        return "Rank %s" % tier
+        return f"{medal} {stars}"
+    except (TypeError, ValueError):
+        return f"Rank {tier}"
 
 
 def parse_player_identifiers(raw_text):
@@ -106,11 +111,11 @@ def parse_player_identifiers(raw_text):
     ids = set()
 
     # 1. URL OpenDota / Dotabuff
-    for m in re.finditer(r"(?:opendota\.com|dotabuff\.com|stratz\.com)/players/(\d+)", text, re.I):
+    for m in re.finditer(r"(?:opendota\.com|dotabuff\.com|stratz\.com)/players/(\d+)", text, re.IGNORECASE):
         ids.add(int(m.group(1)))
 
     # 2. Steam3: [U:1:1092348748]
-    for m in re.finditer(r"\[U:1:(\d+)\]", text, re.I):
+    for m in re.finditer(r"\[U:1:(\d+)\]", text, re.IGNORECASE):
         ids.add(int(m.group(1)))
 
     # 3. SteamID64 (7656119...)
@@ -124,35 +129,35 @@ def parse_player_identifiers(raw_text):
         if not str(val).startswith("7656119"):
             ids.add(val)
 
-    return sorted(list(ids))
+    return sorted(ids)
 
 
 def scout_player(account_id):
     """Глубокая разведка одного игрока: профиль, винрейт, недавние герои, смурф-анализ."""
     try:
         aid = int(account_id)
-    except Exception:
+    except (TypeError, ValueError):
         return {"ok": False, "error": "Неверный account_id"}
 
-    cache_file = os.path.join(PLAYERS_CACHE_DIR, "%d.json" % aid)
+    cache_file = os.path.join(PLAYERS_CACHE_DIR, f"{aid}.json")
     # Кэш на 20 минут
     if os.path.exists(cache_file):
         try:
             if time.time() - os.path.getmtime(cache_file) < 1200:
                 with open(cache_file, encoding="utf-8") as f:
                     return json.load(f)
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            logger.debug("Failed to read player cache %s: %s", cache_file, e)
 
     # Параллельный запрос к OpenDota (профиль + последние матчи)
-    p_info, p_err = _http_get("https://api.opendota.com/api/players/%d" % aid)
-    recent, r_err = _http_get("https://api.opendota.com/api/players/%d/recentMatches" % aid)
+    p_info, _p_err = _http_get(f"https://api.opendota.com/api/players/{aid}")
+    recent, _r_err = _http_get(f"https://api.opendota.com/api/players/{aid}/recentMatches")
 
     if not p_info and not recent:
         return {"ok": False, "account_id": aid, "error": "Профиль закрыт или не найден в OpenDota"}
 
     profile = (p_info or {}).get("profile") or {}
-    name = profile.get("personaname") or ("Player_%d" % aid)
+    name = profile.get("personaname") or f"Player_{aid}"
     avatar = profile.get("avatarfull") or profile.get("avatarmedium")
     rank_tier = (p_info or {}).get("rank_tier") or 0
     rank_name = format_rank_tier(rank_tier)
@@ -189,7 +194,7 @@ def scout_player(account_id):
         if hid not in hero_stats:
             hero_stats[hid] = {
                 "hero_id": hid,
-                "name": HEROES_MAP.get(hid, "Hero_%d" % hid),
+                "name": HEROES_MAP.get(hid, f"Hero_{hid}"),
                 "games": 0,
                 "wins": 0,
                 "kills": 0,
@@ -234,31 +239,31 @@ def scout_player(account_id):
     if total_recent >= 12:
         if winrate_pct >= 80.0:
             smurf_score += 45
-            triggers.append("🔥 Сверхвысокий винрейт: %0.1f%% (%d из %d побед)!" % (winrate_pct, wins_count, total_recent))
+            triggers.append(f"🔥 Сверхвысокий винрейт: {winrate_pct:.1f}% ({wins_count} из {total_recent} побед)!")
         elif winrate_pct >= 70.0:
             smurf_score += 30
-            triggers.append("⚡ Высокий винрейт в последних матчах: %0.1f%% (%d побед)." % (winrate_pct, wins_count))
+            triggers.append(f"⚡ Высокий винрейт в последних матчах: {winrate_pct:.1f}% ({wins_count} побед).")
         elif winrate_pct <= 35.0:
-            triggers.append("❄️ Игрок на сильном лузстрике (винрейт %0.1f%%, тильт)." % winrate_pct)
+            triggers.append(f"❄️ Игрок на сильном лузстрике (винрейт {winrate_pct:.1f}%, тильт).")
 
     # 2. Боевой импакт и KDA
     if total_recent >= 8:
         if avg_kda >= 5.5:
             smurf_score += 30
-            triggers.append("⚔️ Аномально высокий KDA: %.2f (в среднем убивает без смертей)." % avg_kda)
+            triggers.append(f"⚔️ Аномально высокий KDA: {avg_kda:.2f} (в среднем убивает без смертей).")
         elif avg_kda >= 4.2:
             smurf_score += 15
-            triggers.append("🎯 Высокий средний KDA: %.2f." % avg_kda)
+            triggers.append(f"🎯 Высокий средний KDA: {avg_kda:.2f}.")
 
     # 3. Спам смурф/чиз-героев с безумным винрейтом
     cheese_spammed = []
     for h in recent_heroes:
         if h["is_smurf_hero"] and h["games"] >= 3 and h["winrate_pct"] >= 70.0:
-            cheese_spammed.append("%s (%d игр, %0.0f%% WR)" % (h["hero_name"], h["games"], h["winrate_pct"]))
+            cheese_spammed.append(f"{h['hero_name']} ({h['games']} игр, {h['winrate_pct']:.0f}% WR)")
 
     if cheese_spammed:
         smurf_score += 35
-        triggers.append("🚨 Опасный спамер буст-героев: %s!" % ", ".join(cheese_spammed))
+        triggers.append(f"🚨 Опасный спамер буст-героев: {', '.join(cheese_spammed)}!")
 
     # Вычисляем статус
     if smurf_score >= 60:
@@ -278,9 +283,9 @@ def scout_player(account_id):
     tips = []
     if cheese_spammed:
         first_cheese = recent_heroes[0]["hero_name"]
-        tips.append("Рекомендуется забанить %s или взять контрпик с точечным дизейблом." % first_cheese)
+        tips.append(f"Рекомендуется забанить {first_cheese} или взять контрпик с точечным дизейблом.")
     elif recent_heroes and recent_heroes[0]["winrate_pct"] >= 70.0 and recent_heroes[0]["games"] >= 3:
-        tips.append("Забанить сигнатурку: %s (%0.0f%% WR)." % (recent_heroes[0]["hero_name"], recent_heroes[0]["winrate_pct"]))
+        tips.append(f"Забанить сигнатурку: {recent_heroes[0]['hero_name']} ({recent_heroes[0]['winrate_pct']:.0f}% WR).")
     elif verdict_class == "tilt":
         tips.append("Игрок в тильте — активно гангайте его линию для деморализации.")
 
@@ -315,8 +320,8 @@ def scout_player(account_id):
     try:
         with open(cache_file, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False)
-    except Exception:
-        pass
+    except (OSError, TypeError, ValueError) as e:
+        logger.debug("Failed to write player cache %s: %s", cache_file, e)
 
     return result
 
@@ -335,7 +340,7 @@ def scout_lobby(identifiers_raw):
             try:
                 res = future.result()
                 results.append(res)
-            except Exception as e:
+            except Exception as e:  # Thread worker boundary: preserve per-player failure report
                 aid = future_map[future]
                 results.append({"ok": False, "account_id": aid, "error": str(e)})
 
@@ -354,31 +359,32 @@ def scout_lobby(identifiers_raw):
 def fmt_player_scout(p):
     """Красивая короткая выписка по игроку для терминала и MCP."""
     if not p.get("ok"):
-        return "❌ ID %s: %s" % (p.get("account_id"), p.get("error"))
+        return f"❌ ID {p.get('account_id')}: {p.get('error')}"
 
     s = p["recent_summary"]
     v = p["smurf_verdict"]
 
     lines = []
-    lines.append("👤 %s [%s] (ID: %s) — %s" % (p["name"], p["rank_name"], p["account_id"], v["badge"]))
-    lines.append("   Форма: %dW - %dL (%0.1f%% WR) | KDA: %.2f | GPM: %d" % (
-        s["wins"], s["losses"], s["winrate_pct"], s["avg_kda"], s["avg_gpm"]
-    ))
+    lines.append(f"👤 {p['name']} [{p['rank_name']}] (ID: {p['account_id']}) — {v['badge']}")
+    lines.append(
+        f"   Форма: {s['wins']}W - {s['losses']}L ({s['winrate_pct']:.1f}% WR) "
+        f"| KDA: {s['avg_kda']:.2f} | GPM: {int(s['avg_gpm'])}"
+    )
 
     # Топ герои
     h_strs = []
     for h in p.get("recent_heroes", [])[:3]:
-        h_strs.append("%s (%d игр, %0.0f%% WR)" % (h["hero_name"], h["games"], h["winrate_pct"]))
+        h_strs.append(f"{h['hero_name']} ({h['games']} игр, {h['winrate_pct']:.0f}% WR)")
     if h_strs:
         lines.append("   Пул последних игр: " + ", ".join(h_strs))
 
     if v.get("triggers"):
         for t in v["triggers"]:
-            lines.append("   %s" % t)
+            lines.append(f"   {t}")
 
     if v.get("tips"):
         for tip in v["tips"]:
-            lines.append("   💡 Совет: %s" % tip)
+            lines.append(f"   💡 Совет: {tip}")
 
     return "\n".join(lines)
 
@@ -386,23 +392,21 @@ def fmt_player_scout(p):
 def fmt_lobby_report(lobby):
     """Отчет по всему лобби."""
     if not lobby.get("ok"):
-        return "Ошибка: %s" % lobby.get("error")
+        return f"Ошибка: {lobby.get('error')}"
 
     lines = []
     lines.append("══════════════════════════════════════════════════════════════════")
-    lines.append("🕵️ РАЗВЕДКА ЛОББИ И СМУРФ-РАДАР (Игроков: %d)" % lobby["players_count"])
+    lines.append(f"🕵️ РАЗВЕДКА ЛОББИ И СМУРФ-РАДАР (Игроков: {lobby['players_count']})")
     lines.append("══════════════════════════════════════════════════════════════════")
     for i, p in enumerate(lobby.get("players", []), 1):
-        lines.append("%d. %s" % (i, fmt_player_scout(p)))
+        lines.append(f"{i}. {fmt_player_scout(p)}")
         lines.append("──────────────────────────────────────────────────────────────────")
     return "\n".join(lines)
 
 
 if __name__ == "__main__":
-    try:
+    with contextlib.suppress(AttributeError, io.UnsupportedOperation, OSError, ValueError):
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    except Exception:
-        pass
 
     args = sys.argv[1:]
     if not args:

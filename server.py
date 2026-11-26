@@ -1,14 +1,13 @@
 """MCP stdio-сервер: JSON-RPC по stdin/stdout. Stdlib-only."""
-import io
+import contextlib
 import json
+import logging
 import sys
-try:
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace")
-except Exception:
-    pass
+
 import dota_tools_a as A
 import dota_tools_b as B
+
+logger = logging.getLogger(__name__)
 
 TOOLS = [
     {"name": "dota_launch", "description": "Запустить Dota 2. mode=training - инструкция по лобби с ботами.",
@@ -92,18 +91,21 @@ def handle(msg):
     if method == "tools/call":
         fn = DISPATCH.get(params.get("name"))
         if not fn:
-            return err(-32602, "нет инструмента: %s" % params.get("name"))
+            return err(-32602, f"нет инструмента: {params.get('name')}")
         try:
             out = fn(params.get("arguments") or {})
-        except Exception as e:
+        except Exception as e:  # Top-level RPC boundary: return error payload without crashing server
             out = {"ok": False, "error": str(e)}
         return ok({"content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False, indent=2)}]})
     if method == "ping":
         return ok({})
-    return err(-32601, "метод: %s" % method)
+    return err(-32601, f"метод: {method}")
 
 
 def main():
+    with contextlib.suppress(AttributeError, OSError, ValueError):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     while True:
         try:
             line = sys.stdin.readline()
@@ -116,7 +118,8 @@ def main():
             continue
         try:
             msg = json.loads(line)
-        except Exception:
+        except json.JSONDecodeError as e:
+            logger.debug("Ignored invalid JSON-RPC input: %s", e)
             continue
         resp = handle(msg)
         if resp is not None:

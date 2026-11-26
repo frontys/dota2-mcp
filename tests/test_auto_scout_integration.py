@@ -5,8 +5,6 @@
 3. Интеграцию с live_data и live_board API.
 4. Отсутствие внешних зависимостей и корректность кэширования.
 """
-import io
-import json
 import os
 import sys
 import unittest

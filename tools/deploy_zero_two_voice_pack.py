@@ -3,15 +3,13 @@ Deploys 100% genuine Russian Zero Two (Cleo-chan, AniLibria) voice lines for Dot
 Replaces generic TTS with authentic high-fidelity anime acting.
 """
 
-import os
+import contextlib
 import shutil
 import sys
 from pathlib import Path
 
-try:
+with contextlib.suppress(AttributeError, OSError, ValueError):
     sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
 
 BASE_DIR = Path(r"c:\AI\dota2-mcp")
 AUDIO_DIR = BASE_DIR / "audio_cute"

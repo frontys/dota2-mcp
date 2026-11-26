@@ -1,23 +1,21 @@
-import voice_coach
-import threading
-import auto_accept
 """Dota 2 auto-watcher: следит за процессом dota2.exe и состоянием GSI,
 пишет события в watcher_events.log + watcher_state.json. Stdlib-only.
 Запуск: python watcher.py  (можно свернуть/в фон)
 Остановка: Ctrl+C
 """
-import io
+import contextlib
 import json
+import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 
-try:
-    if sys.stdout is not None and hasattr(sys.stdout, "buffer"):
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-except Exception:
-    pass
+import auto_accept
+import voice_coach
+
+logger = logging.getLogger(__name__)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 LOG = os.path.join(BASE, "watcher_events.log")
@@ -27,25 +25,20 @@ POLL = 2
 
 
 def log(msg):
-    line = "%s %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
     if sys.stdout is not None:
-        try:
+        with contextlib.suppress(OSError, ValueError):
             print(line, flush=True)
-        except Exception:
-            pass
-    try:
-        with open(LOG, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except Exception:
-        pass
+    with contextlib.suppress(OSError, ValueError), open(LOG, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
 
 
 def save_state(obj):
     try:
         with open(STATE, "w", encoding="utf-8") as f:
             json.dump(obj, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    except (OSError, TypeError, ValueError) as e:
+        logger.debug("Failed to save watcher state: %s", e)
 
 
 def play_voice(filename):
@@ -60,8 +53,8 @@ def play_voice(filename):
             sys.path.insert(0, r"C:\AI\desktop-control")
             import audio
             audio.play_audio(target)
-    except Exception:
-        pass
+    except Exception as e:  # Optional external audio module boundary
+        logger.debug("play_voice failed: %s", e)
 
 
 def notify(title, msg):
@@ -72,7 +65,7 @@ def notify(title, msg):
         ps = (
             "$xml=@\"\n"
             "<toast><visual><binding template='ToastGeneric'>"
-            "<text>%s</text><text>%s</text>"
+            f"<text>{t}</text><text>{m}</text>"
             "</binding></visual></toast>\n"
             "\"@; "
             "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] | Out-Null; "
@@ -80,29 +73,45 @@ def notify(title, msg):
             "$doc.LoadXml($xml); "
             "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Dota2 MCP').Show("
             "[Windows.UI.Notifications.ToastNotification, Windows.UI.Notifications, ContentType=WindowsRuntime]::new($doc))"
-        ) % (t, m)
-        subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                        "-Command", ps], capture_output=True, timeout=15, creationflags=0x08000000)
-    except Exception:
-        pass
+        )
+        subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+            check=False,
+            capture_output=True,
+            timeout=15,
+            creationflags=0x08000000,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError) as e:
+        logger.debug("Toast notify failed: %s", e)
 
 
 def dota_running():
     try:
         import psutil
-        for p in psutil.process_iter(['name']):
-            name = p.info.get('name')
-            if name and name.lower() == 'dota2.exe':
-                return True
-        return False
-    except Exception:
-        pass
+    except ImportError:
+        psutil = None
+
+    if psutil is not None:
+        try:
+            for p in psutil.process_iter(["name"]):
+                name = p.info.get("name")
+                if name and name.lower() == "dota2.exe":
+                    return True
+            return False
+        except (psutil.Error, OSError) as e:
+            logger.debug("psutil process_iter failed: %s", e)
+
     try:
-        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq dota2.exe", "/FO", "CSV", "/NH"],
-                             capture_output=True, timeout=5, creationflags=0x08000000)
+        out = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq dota2.exe", "/FO", "CSV", "/NH"],
+            check=False,
+            capture_output=True,
+            timeout=5,
+            creationflags=0x08000000,
+        )
         txt = (out.stdout or b"").decode("utf-8", "replace").lower()
         return "dota2.exe" in txt
-    except Exception:
+    except (OSError, subprocess.SubprocessError, ValueError):
         return False
 
 
@@ -123,15 +132,15 @@ def gsi_info():
                 "hero": hero,
                 "spectator": spect,
                 "matchid": mp.get("matchid"),
-                "score": "%s:%s" % (mp.get("radiant_score", "?"), mp.get("dire_score", "?")),
+                "score": f"{mp.get('radiant_score', '?')}:{mp.get('dire_score', '?')}",
                 "clock": mp.get("clock_time", mp.get("game_time")),
-                "kda": "%s/%s/%s" % (pl.get("kills", "?"), pl.get("deaths", "?"), pl.get("assists", "?")),
+                "kda": f"{pl.get('kills', '?')}/{pl.get('deaths', '?')}/{pl.get('assists', '?')}",
                 "gpm": pl.get("gold_per_min"),
                 "hp": (d.get("hero") or {}).get("health"),
                 "events_n": len(ev),
                 "has_buildings": bool(bld),
                 "paused": mp.get("paused")}
-    except Exception:
+    except (OSError, json.JSONDecodeError, TypeError, ValueError, AttributeError):
         return None
 
 
@@ -143,16 +152,16 @@ def start_background_servers():
         def _run_gsi():
             try:
                 srv = gsi_server.HTTPServer((gsi_server.HOST, gsi_server.PORT), gsi_server.Handler)
-                log("GSI сервер запущен на http://%s:%d" % (gsi_server.HOST, gsi_server.PORT))
+                log(f"GSI сервер запущен на http://{gsi_server.HOST}:{gsi_server.PORT}")
                 srv.serve_forever()
             except OSError as e:
-                log("GSI сервер порт %d уже занят (возможно запущен отдельно): %s" % (gsi_server.PORT, e))
+                log(f"GSI сервер порт {gsi_server.PORT} уже занят (возможно запущен отдельно): {e}")
             except Exception as e:
-                log("GSI сервер ошибка: %s" % e)
+                log(f"GSI сервер ошибка: {e}")
         t_gsi = threading.Thread(target=_run_gsi, daemon=True, name="GSIServerThread")
         t_gsi.start()
     except Exception as e:
-        log("Не удалось запустить GSI сервер: %s" % e)
+        log(f"Не удалось запустить GSI сервер: {e}")
 
     # 2. Live HUD 2.0 (локальный сайт)
     try:
@@ -162,16 +171,16 @@ def start_background_servers():
                 live_board.C.track_tick()
                 live_board.start_pipe_broadcaster()
                 srv = live_board.HTTPServer((live_board.HOST, live_board.PORT), live_board.H)
-                log("Live HUD 2.0 (локальный сайт) запущен на http://%s:%d" % (live_board.HOST, live_board.PORT))
+                log(f"Live HUD 2.0 (локальный сайт) запущен на http://{live_board.HOST}:{live_board.PORT}")
                 srv.serve_forever()
             except OSError as e:
-                log("Live HUD порт %d уже занят (возможно запущен отдельно): %s" % (live_board.PORT, e))
+                log(f"Live HUD порт {live_board.PORT} уже занят (возможно запущен отдельно): {e}")
             except Exception as e:
-                log("Live HUD ошибка: %s" % e)
+                log(f"Live HUD ошибка: {e}")
         t_board = threading.Thread(target=_run_board, daemon=True, name="LiveBoardThread")
         t_board.start()
     except Exception as e:
-        log("Не удалось запустить Live HUD: %s" % e)
+        log(f"Не удалось запустить Live HUD: {e}")
 
 
 
@@ -188,9 +197,9 @@ def start_overlay():
             si = subprocess.STARTUPINFO()
             si.lpDesktop = r"winsta0\default"
             _overlay_proc = subprocess.Popen([OVERLAY_EXE], startupinfo=si, creationflags=0x08000000)
-            log("WPF In-Game Overlay запущен (PID %d)" % _overlay_proc.pid)
-        except Exception as e:
-            log("Не удалось запустить WPF In-Game Overlay: %s" % e)
+            log(f"WPF In-Game Overlay запущен (PID {_overlay_proc.pid})")
+        except (OSError, ValueError, AttributeError) as e:
+            log(f"Не удалось запустить WPF In-Game Overlay: {e}")
 
 
 def stop_overlay():
@@ -199,13 +208,16 @@ def stop_overlay():
         try:
             _overlay_proc.terminate()
             log("WPF In-Game Overlay остановлен")
-        except Exception:
-            pass
+        except (OSError, ProcessLookupError) as e:
+            logger.debug("Failed to terminate overlay process: %s", e)
         _overlay_proc = None
 
 def main():
+    if sys.stdout is not None:
+        with contextlib.suppress(AttributeError, OSError, ValueError):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     start_background_servers()
-    log("watcher старт (опрос каждые %d c)" % POLL)
+    log(f"watcher старт (опрос каждые {POLL} c)")
     was_running = None
     last_stage = None
     last_hero = None
@@ -215,7 +227,7 @@ def main():
             running = dota_running()
             if was_running is None:
                 was_running = running
-                log("dota2.exe: %s" % ("запущена" if running else "не найдена"))
+                log(f"dota2.exe: {'запущена' if running else 'не найдена'}")
                 save_state({"dota_running": running, "ts": time.time()})
                 if running:
                     start_overlay()
@@ -239,9 +251,12 @@ def main():
                 stage = g["stage"] if g else None
                 if g and fresh and stage != last_stage:
                     if g.get("spectator"):
-                        log("EVENT: стадия -> %s [SPECTATE матч %s счёт %s время %s]" % (stage, g.get("matchid"), g.get("score"), g["clock"]))
+                        log(
+                            f"EVENT: стадия -> {stage} [SPECTATE матч {g.get('matchid')} "
+                            f"счёт {g.get('score')} время {g['clock']}]"
+                        )
                     else:
-                        log("EVENT: стадия -> %s (герой %s, время %s)" % (stage, g["hero"], g["clock"]))
+                        log(f"EVENT: стадия -> {stage} (герой {g['hero']}, время {g['clock']})")
                     last_stage = stage
                     if stage == "DOTA_GAMERULES_STATE_HERO_SELECTION":
                         log("EVENT: СТАДИЯ ВЫБОРА ГЕРОЕВ (Радар лобби и смурф-детектор активны)")
@@ -249,31 +264,41 @@ def main():
                         voice_coach.coach.on_game_start()
                     if stage in ("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",) and match_start is None:
                         match_start = time.time()
-                        log("EVENT: МАТЧ НАЧАЛСЯ (%s)" % g["hero"])
-                        notify("Матч начался", "%s — удачи! Напиши мне «что там?» для совета." % g["hero"].replace("npc_dota_hero_", ""))
+                        log(f"EVENT: МАТЧ НАЧАЛСЯ ({g['hero']})")
+                        hero_short = g["hero"].replace("npc_dota_hero_", "")
+                        notify("Матч начался", f"{hero_short} — удачи! Напиши мне «что там?» для совета.")
                         voice_coach.coach.on_game_start()
                     if stage in ("DOTA_GAMERULES_STATE_POST_GAME", "DOTA_GAMERULES_STATE_GAME_OVER") and match_start:
                         dur = int((time.time() - match_start) / 60)
-                        log("EVENT: МАТЧ ЗАКОНЧЕН (%s, KDA %s, длился ~%d мин)" % (g["hero"], g["kda"], dur))
-                        notify("Матч окончен", "%s, KDA %s, ~%d мин. Напиши мне для разбора!" % (
-                            g["hero"].replace("npc_dota_hero_", ""), g["kda"], dur))
+                        log(f"EVENT: МАТЧ ЗАКОНЧЕН ({g['hero']}, KDA {g['kda']}, длился ~{dur} мин)")
+                        hero_short = g["hero"].replace("npc_dota_hero_", "")
+                        notify(
+                            "Матч окончен",
+                            f"{hero_short}, KDA {g['kda']}, ~{dur} мин. Напиши мне для разбора!",
+                        )
                         voice_coach.coach.on_victory()
                         match_start = None
                 if g and fresh and g["hero"] != last_hero and g["hero"] != "?":
                     last_hero = g["hero"]
-                    log("Герой: %s" % g["hero"])
+                    log(f"Герой: {g['hero']}")
 
                 # Live Cute Voice Timers (Bounty, Wisdom, River runes)
                 if g and fresh and stage == "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS" and isinstance(g.get("clock"), (int, float)):
                     cue = voice_coach.coach.check_timers(int(g["clock"]))
                     if cue:
-                        log("EVENT: ОЗВУЧКА -> %s (время матча %d)" % (cue, int(g["clock"])))
+                        log(f"EVENT: ОЗВУЧКА -> {cue} (время матча {int(g['clock'])})")
 
                 # Auto-Accept match if in menu/queue
-                if not (g and fresh and stage in ("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "DOTA_GAMERULES_STATE_HERO_SELECTION")):
-                    if auto_accept.try_accept_match():
-                        log("EVENT: МАТЧ АВТО-ПРИНЯТ!")
-                        notify("Dota 2 Auto-Accept", "Матч найден и успешно принят! ✅")
+                if (
+                    not (
+                        g
+                        and fresh
+                        and stage in ("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "DOTA_GAMERULES_STATE_HERO_SELECTION")
+                    )
+                    and auto_accept.try_accept_match()
+                ):
+                    log("EVENT: МАТЧ АВТО-ПРИНЯТ!")
+                    notify("Dota 2 Auto-Accept", "Матч найден и успешно принят! ✅")
                 save_state({"dota_running": True, "gsi_fresh": fresh,
                             "stage": stage if (g and fresh) else None,
                             "hero": (g["hero"] if g else None), "ts": time.time()})
@@ -282,7 +307,7 @@ def main():
             log("watcher остановлен")
             break
         except Exception as e:
-            log("ошибка: %s" % e)
+            log(f"ошибка: {e}")
             time.sleep(POLL)
 
 

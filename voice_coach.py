@@ -12,14 +12,18 @@ Key Features:
 """
 
 import argparse
+import contextlib
 import ctypes
 import json
+import logging
 import os
 import queue
 import threading
 import time
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
 AUDIO_DIR = BASE_DIR / "audio_cute"
@@ -29,14 +33,20 @@ STATE_FILE = BASE_DIR / "gsi_latest.json"
 # Optional COM initialization for SAPI5 pyttsx3 in Windows worker thread
 try:
     import pythoncom
+    import pywintypes
+
     HAS_PYTHONCOM = True
-except Exception:
+except (ImportError, OSError):
+    pythoncom = None
+    pywintypes = None
     HAS_PYTHONCOM = False
+
+_COM_ERRORS = (pywintypes.com_error, OSError, AttributeError) if pywintypes is not None else (OSError, AttributeError)
 
 try:
     import pyttsx3
     HAS_PYTTSX3 = True
-except Exception:
+except (ImportError, OSError):
     HAS_PYTTSX3 = False
 
 
@@ -57,7 +67,7 @@ def _play_winmm_audio(file_path: Path) -> bool:
             mci(f'close {alias}', None, 0, None)
             return True
         return False
-    except Exception:
+    except (OSError, ctypes.ArgumentError, AttributeError, ValueError):
         return False
 
 
@@ -81,8 +91,8 @@ class VoiceWorker(threading.Thread):
         if HAS_PYTHONCOM:
             try:
                 pythoncom.CoInitialize()
-            except Exception:
-                pass
+            except _COM_ERRORS as e:
+                logger.debug("CoInitialize failed: %s", e)
 
         if HAS_PYTTSX3:
             try:
@@ -102,7 +112,7 @@ class VoiceWorker(threading.Thread):
                         break
                 if selected_voice:
                     self._engine.setProperty("voice", selected_voice)
-            except Exception:
+            except Exception:  # SAPI5/COM driver init may raise arbitrary driver errors
                 self._engine = None
 
         while self._running:
@@ -132,16 +142,16 @@ class VoiceWorker(threading.Thread):
                     self.rate = max(100, min(300, int(arg)))
                     if self._engine:
                         self._engine.setProperty("rate", self.rate)
-            except Exception:
-                pass
+            except Exception as e:  # Audio worker boundary: keep worker alive on driver errors
+                logger.debug("VoiceWorker task %s failed: %s", action, e)
             finally:
                 self.queue.task_done()
 
         if HAS_PYTHONCOM:
             try:
                 pythoncom.CoUninitialize()
-            except Exception:
-                pass
+            except _COM_ERRORS as e:
+                logger.debug("CoUninitialize failed: %s", e)
 
     def stop(self):
         self._running = False
@@ -187,8 +197,8 @@ class CuteVoiceCoach:
             if CONFIG_FILE.exists():
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                     return json.load(f)
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            logger.debug("Failed to load voice coach config: %s", e)
         return {}
 
     def set_volume(self, volume: float):
@@ -233,12 +243,10 @@ class CuteVoiceCoach:
 
         # Discard expired tasks if worker queue is backlogged
         if self.worker.queue.qsize() > 5:
-            try:
+            with contextlib.suppress(queue.Empty):
                 while not self.worker.queue.empty():
                     self.worker.queue.get_nowait()
                     self.worker.queue.task_done()
-            except Exception:
-                pass
 
         # Use pre-recorded sample if requested and file exists
         if self.prefer_audio_samples and sample_file:

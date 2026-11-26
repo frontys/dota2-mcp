@@ -1,5 +1,6 @@
 """Live-доска ч.1: данные. Импортируется из live_board_server. Stdlib-only."""
 import json
+import logging
 import os
 import sys
 import threading
@@ -7,16 +8,18 @@ import time
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
-import dota_core as C
 import auto_scout
+import dota_core as C
+
+logger = logging.getLogger(__name__)
 
 HEROES = {}
 try:
     with open(os.path.join(BASE, "heroes_cache.json"), encoding="utf-8") as f:
         for h in json.load(f) or []:
             HEROES[int(h.get("id"))] = h.get("localized_name", str(h.get("id")))
-except Exception:
-    pass
+except (OSError, json.JSONDecodeError, TypeError, ValueError, AttributeError) as e:
+    logger.debug("Failed to load heroes cache: %s", e)
 
 _CACHE = {"board": None, "ts": 0.0}
 _LOCK = threading.Lock()
@@ -24,8 +27,8 @@ _LOCK = threading.Lock()
 
 def hero_name(hid):
     try:
-        return HEROES.get(int(hid), "hero_%s" % hid)
-    except Exception:
+        return HEROES.get(int(hid), f"hero_{hid}")
+    except (TypeError, ValueError):
         return str(hid)
 
 
@@ -58,11 +61,11 @@ def compute_map_timers(clock_sec):
 
     # 1. Баунти руны: каждые 4 мин (240 сек)
     bounty_rem = 240 - (c % 240) if c >= 0 else 0
-    bounty_fmt = "%02d:%02d" % (bounty_rem // 60, bounty_rem % 60)
+    bounty_fmt = f"{bounty_rem // 60:02d}:{bounty_rem % 60:02d}"
 
     # 2. Лотусы: каждые 3 мин (180 сек)
     lotus_rem = 180 - (c % 180) if c >= 0 else 0
-    lotus_fmt = "%02d:%02d" % (lotus_rem // 60, lotus_rem % 60)
+    lotus_fmt = f"{lotus_rem // 60:02d}:{lotus_rem % 60:02d}"
 
     # 3. Руны реки: Вода на 2:00 (120s) и 4:00 (240s). Активные руны с 6:00 (360s) каждые 2 мин (120s)
     if c < 120:
@@ -77,11 +80,11 @@ def compute_map_timers(clock_sec):
     else:
         river_rem = 120 - (c % 120)
         river_type = "Активная руна реки (каждые 2 мин)"
-    river_fmt = "%02d:%02d" % (river_rem // 60, river_rem % 60)
+    river_fmt = f"{river_rem // 60:02d}:{river_rem % 60:02d}"
 
     # 4. Руны мудрости: каждые 7 мин (420 сек)
     wisdom_rem = 420 - (c % 420) if c >= 0 else 0
-    wisdom_fmt = "%02d:%02d" % (wisdom_rem // 60, wisdom_rem % 60)
+    wisdom_fmt = f"{wisdom_rem // 60:02d}:{wisdom_rem % 60:02d}"
 
     # 5. Смена дня и ночи + Рошан: каждые 5 мин (300 сек).
     # День: 0-5, 10-15... Рошан в Юго-Восточном логове (Radiant)
@@ -89,16 +92,16 @@ def compute_map_timers(clock_sec):
     cycle = c // 300
     is_day = (cycle % 2 == 0)
     day_rem = 300 - (c % 300)
-    day_fmt = "%02d:%02d" % (day_rem // 60, day_rem % 60)
+    day_fmt = f"{day_rem // 60:02d}:{day_rem % 60:02d}"
     roshan_current_cave = "Юго-Восток (Radiant ☀️)" if is_day else "Северо-Запад (Dire 🌙)"
     roshan_next_cave = "Dire 🌙" if is_day else "Radiant ☀️"
-    roshan_status = "%s (переход через %s в %s)" % (roshan_current_cave, day_fmt, roshan_next_cave)
+    roshan_status = f"{roshan_current_cave} (переход через {day_fmt} в {roshan_next_cave})"
 
     # 6. Терзатель: спавн на 20:00 (1200 сек)
     if c < 1200:
         tormentor_rem = 1200 - c
-        tormentor_fmt = "%02d:%02d" % (tormentor_rem // 60, tormentor_rem % 60)
-        tormentor_status = "Спавн через %s" % tormentor_fmt
+        tormentor_fmt = f"{tormentor_rem // 60:02d}:{tormentor_rem % 60:02d}"
+        tormentor_status = f"Спавн через {tormentor_fmt}"
     else:
         tormentor_rem = 0
         tormentor_fmt = "Активен"
@@ -109,31 +112,31 @@ def compute_map_timers(clock_sec):
         n_tier = 1
         n_rem = 420 - c
         n_title = "НЕЙТРАЛКИ Т1"
-        n_fmt = "%02d:%02d" % (n_rem // 60, n_rem % 60)
+        n_fmt = f"{n_rem // 60:02d}:{n_rem % 60:02d}"
         n_alert = n_rem <= 30
     elif c < 1020:
         n_tier = 2
         n_rem = 1020 - c
         n_title = "НЕЙТРАЛКИ Т2"
-        n_fmt = "%02d:%02d" % (n_rem // 60, n_rem % 60)
+        n_fmt = f"{n_rem // 60:02d}:{n_rem % 60:02d}"
         n_alert = n_rem <= 30
     elif c < 1620:
         n_tier = 3
         n_rem = 1620 - c
         n_title = "НЕЙТРАЛКИ Т3"
-        n_fmt = "%02d:%02d" % (n_rem // 60, n_rem % 60)
+        n_fmt = f"{n_rem // 60:02d}:{n_rem % 60:02d}"
         n_alert = n_rem <= 30
     elif c < 2220:
         n_tier = 4
         n_rem = 2220 - c
         n_title = "НЕЙТРАЛКИ Т4"
-        n_fmt = "%02d:%02d" % (n_rem // 60, n_rem % 60)
+        n_fmt = f"{n_rem // 60:02d}:{n_rem % 60:02d}"
         n_alert = n_rem <= 30
     elif c < 3600:
         n_tier = 5
         n_rem = 3600 - c
         n_title = "НЕЙТРАЛКИ Т5"
-        n_fmt = "%02d:%02d" % (n_rem // 60, n_rem % 60)
+        n_fmt = f"{n_rem // 60:02d}:{n_rem % 60:02d}"
         n_alert = n_rem <= 30
     else:
         n_tier = 5
@@ -146,7 +149,7 @@ def compute_map_timers(clock_sec):
     sec_in_min = c % 60 if c >= 0 else 0
     if sec_in_min < 45:
         stack_rem = 53 - sec_in_min
-        stack_fmt = "%02dс" % stack_rem
+        stack_fmt = f"{stack_rem:02d}с"
         stack_active = False
     elif 45 <= sec_in_min <= 55:
         stack_rem = 0
@@ -154,7 +157,7 @@ def compute_map_timers(clock_sec):
         stack_active = True
     else:
         stack_rem = (60 - sec_in_min) + 53
-        stack_fmt = "%02dс" % stack_rem
+        stack_fmt = f"{stack_rem:02d}с"
         stack_active = False
 
     return {
@@ -265,7 +268,7 @@ def build_board():
         "hero_name": h_name_clean,
         "team": pl.get("team_name", "unknown"),
         "gold": gold,
-        "kda": "%s/%s/%s" % (pl.get("kills", 0), pl.get("deaths", 0), pl.get("assists", 0)),
+        "kda": f"{pl.get('kills', 0)}/{pl.get('deaths', 0)}/{pl.get('assists', 0)}",
         "lh": pl.get("last_hits", 0),
         "denies": pl.get("denies", 0),
         "gpm_gsi": pl.get("gold_per_min", 0),
@@ -288,19 +291,19 @@ def build_board():
         try:
             et = e.get("event_type")
             gt = e.get("game_time", 0)
-            fmt_t = "%02d:%02d" % (int(gt) // 60, int(gt) % 60) if gt else "--:--"
+            fmt_t = f"{int(gt) // 60:02d}:{int(gt) % 60:02d}" if gt else "--:--"
             if et in ("killer", "kill"):
-                last.append("⚔️ [%s] %s убил %s" % (fmt_t, e.get("killer"), e.get("victim")))
+                last.append(f"⚔️ [{fmt_t}] {e.get('killer')} убил {e.get('victim')}")
             elif et == "roshan_killed":
-                last.append("🐉 [%s] Рошан повержен!" % fmt_t)
+                last.append(f"🐉 [{fmt_t}] Рошан повержен!")
             elif et == "generic_event":
                 d = json.loads(e.get("data", "{}"))
                 tp = d.get("type", "событие")
-                last.append("⚡ [%s] %s" % (fmt_t, tp))
+                last.append(f"⚡ [{fmt_t}] {tp}")
             else:
-                last.append("📢 [%s] %s" % (fmt_t, et))
-        except Exception:
-            pass
+                last.append(f"📢 [{fmt_t}] {et}")
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as err:
+            logger.debug("Failed to parse live_data event: %s", err)
     board["events"] = last[-8:] if last else ["Матч идёт, событий пока нет"]
 
     # Автоматическая разведка лобби и смурф-радар (GSI + OpenDota Live + Console)

@@ -4,19 +4,19 @@ from 'Darling in the FranXX' [AniLibria.TV HDTV-Rip 720p].
 Extracts clean Russian audio segments matching ASS subtitle timestamps.
 """
 
+import contextlib
 import csv
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-try:
+with contextlib.suppress(AttributeError, OSError, ValueError):
     sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
 
 FFMPEG_EXE = r"C:\Users\fronty\AppData\Roaming\Python\Python314\site-packages\imageio_ffmpeg\binaries\ffmpeg.exe"
 SOURCE_DIR = Path(r"C:\Users\fronty\Downloads\Darling in the FranXX - AniLibria.TV [HDTV-Rip 720p]")
@@ -52,8 +52,8 @@ def extract_cues_from_episode(mkv_path: Path, ep_num: int):
     # 1. Extract subtitle track to stdout
     p = subprocess.run(
         [FFMPEG_EXE, "-y", "-i", str(mkv_path), "-map", "0:4", "-f", "ass", "-"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        check=False,
+        capture_output=True,
     )
     ass_text = p.stdout.decode("utf-8", errors="replace")
 
@@ -117,7 +117,7 @@ def process_all_episodes():
         # Extract full Russian audio to temporary WAV for millisecond-fast slicing
         temp_wav = CACHE_DIR / f"temp_ep{idx:02d}_rus.wav"
         t0 = time.time()
-        p_extract = subprocess.run(
+        subprocess.run(
             [
                 FFMPEG_EXE, "-y",
                 "-i", str(mkv_path),
@@ -127,8 +127,8 @@ def process_all_episodes():
                 "-ar", "44100",
                 str(temp_wav),
             ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            check=False,
+            capture_output=True,
         )
 
         if not temp_wav.exists() or temp_wav.stat().st_size < 1000:
@@ -155,8 +155,8 @@ def process_all_episodes():
                     "-b:a", "192k",
                     str(out_path),
                 ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                check=False,
+                capture_output=True,
             )
 
             rel_path = f"Ep{idx:02d}/{out_filename}"
@@ -177,18 +177,13 @@ def process_all_episodes():
             if 3.0 <= cue["duration"] <= 8.5 and len(cue["text"].split()) >= 4:
                 best_filename = f"ZeroTwo_Ref_Ep{idx:02d}_{c_idx:03d}_{fn_title}.mp3"
                 best_path = BEST_DIR / best_filename
-                try:
-                    import shutil
+                with contextlib.suppress(OSError):
                     shutil.copyfile(out_path, best_path)
-                except Exception:
-                    pass
 
         # Cleanup temp wav
-        try:
+        with contextlib.suppress(OSError):
             if temp_wav.exists():
                 os.remove(temp_wav)
-        except Exception:
-            pass
 
         print(f"  ✓ Sliced {len(cues)} cues in {time.time() - t0:.1f}s.")
 
@@ -226,7 +221,7 @@ def process_all_episodes():
     print(f"ГОТОВО! Успешно извлечено {total_extracted} реплик за {time.time() - t_start_all:.1f}s.")
     print(f"Папка с репликами: {OUTPUT_DIR}")
     print(f"Папка лучших референсов: {BEST_DIR} ({best_count} файлов)")
-    print(f"Файлы метаданных: metadata.json, metadata.csv")
+    print("Файлы метаданных: metadata.json, metadata.csv")
     print("=======================================================")
 
 

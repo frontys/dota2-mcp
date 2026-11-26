@@ -5,15 +5,14 @@ Zero GPU latency, 100% offline playback via WinMM.
 """
 
 import asyncio
-import os
+import contextlib
 import sys
 from pathlib import Path
+
 import edge_tts
 
-try:
+with contextlib.suppress(AttributeError, OSError, ValueError):
     sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 AUDIO_DIR = BASE_DIR / "audio_cute"

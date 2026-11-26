@@ -8,6 +8,7 @@
 """
 import ctypes
 import json
+import logging
 import os
 import sys
 import threading
@@ -19,7 +20,8 @@ if BASE not in sys.path:
     sys.path.insert(0, BASE)
 
 import auto_scout
-import dota_core as C
+
+logger = logging.getLogger(__name__)
 
 user32 = ctypes.windll.user32
 GWL_EXSTYLE = -20
@@ -44,8 +46,8 @@ def make_clickthrough(hwnd: int):
         user32.SetWindowLongW(hwnd, GWL_EXSTYLE, s)
         user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW)
-    except Exception:
-        pass
+    except (OSError, ctypes.ArgumentError, AttributeError, ValueError, tk.TclError) as e:
+        logger.debug("make_clickthrough failed: %s", e)
 
 
 class DraftOverlayApp:
@@ -85,8 +87,8 @@ class DraftOverlayApp:
                 if state and not self.last_f8_state:
                     self.manual_override = not self.manual_override
                 self.last_f8_state = state
-            except Exception:
-                pass
+            except (OSError, ctypes.ArgumentError, AttributeError, RuntimeError) as e:
+                logger.debug("Hotkey listener error: %s", e)
             time.sleep(0.08)
 
     def _get_current_stage(self):
@@ -97,8 +99,8 @@ class DraftOverlayApp:
                 with open(p, "r", encoding="utf-8") as f:
                     d = json.load(f)
                 return (d.get("map") or {}).get("game_state", "UNKNOWN")
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, ValueError, AttributeError) as e:
+            logger.debug("Failed to read GSI stage: %s", e)
         return "UNKNOWN"
 
     def _tick(self):
@@ -125,8 +127,8 @@ class DraftOverlayApp:
 
             if self.is_visible:
                 self._render_overlay(lobby)
-        except Exception:
-            pass
+        except Exception as e:  # UI loop boundary: never drop tkinter after-callback
+            logger.debug("DraftOverlay tick error: %s", e)
 
         self.root.after(1200, self._tick)
 
@@ -136,8 +138,8 @@ class DraftOverlayApp:
         for w in self.card_widgets:
             try:
                 w.destroy()
-            except Exception:
-                pass
+            except (tk.TclError, AttributeError) as e:
+                logger.debug("Widget destroy error: %s", e)
         self.card_widgets.clear()
 
         rad = lobby.get("radiant") or []
@@ -185,8 +187,9 @@ class DraftOverlayApp:
             self.card_widgets.append(card)
 
         # Верхняя информационная плашка по центру (статус радара и смурфы)
-        threats = lobby.get("threats_detected", 0)
-        warns = lobby.get("warnings", [])
+        summary = lobby.get("summary") or {}
+        threats = summary.get("enemy_smurfs_detected", lobby.get("threats_detected", 0))
+        warns = summary.get("suggested_bans") or lobby.get("warnings", [])
         if threats > 0 or warns:
             top_bar = tk.Frame(self.root, bg="#1a1423", bd=1, relief="solid", highlightbackground="#ef4444", highlightthickness=1)
             txt = f"🚨 ВНИМАНИЕ: Обнаружено угроз в лобби: {threats}!"

@@ -4,10 +4,8 @@ Detects the green 'ACCEPT' / 'ПРИНЯТЬ' button on screen and clicks it aut
 Zero dependencies, 100% VAC-Safe (pure visual detection, 0 memory hooks).
 """
 
-import os
 import sys
 import time
-from typing import Optional, Tuple
 
 sys.path.insert(0, r"c:\AI\desktop-control")
 import core
@@ -26,7 +24,7 @@ def is_dota_accept_green(r: int, g: int, b: int) -> bool:
     return g > 130 and g > (r * 1.4) and g > (b * 1.4) and r > 30 and b > 30
 
 
-def find_accept_button(monitor_idx: int = 1) -> Optional[Tuple[int, int]]:
+def find_accept_button(monitor_idx: int = 1) -> tuple[int, int] | None:
     """
     Grabs the center region of the primary screen and searches for the accept button.
     Returns (click_x, click_y) if detected, else None.

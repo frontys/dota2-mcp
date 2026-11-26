@@ -3,35 +3,34 @@
 драфт-калькулятор и разведка лобби / смурф-радар.
 Запуск: python live_board.py -> http://127.0.0.1:8081
 """
-import io
+import contextlib
 import json
+import logging
 import os
 import sys
 import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import pipe_server
-
-try:
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
-except Exception:
-    pass
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, BASE)
+if BASE not in sys.path:
+    sys.path.insert(0, BASE)
+import auto_scout
 import dota_core as C
 import draft_engine
 import live_data as D
+import pipe_server
 import scout_engine
-import auto_scout
+
+logger = logging.getLogger(__name__)
 
 HOST = "127.0.0.1"
 PORT = 8081
 try:
     PORT = int(C.CFG.get("live_board_port", 8081))
-except Exception:
-    pass
+except (TypeError, ValueError, AttributeError) as e:
+    logger.debug("Using default live_board port: %s", e)
 
 
 HTML_PAGE = """<!DOCTYPE html>
@@ -1102,20 +1101,23 @@ def start_pipe_broadcaster():
                         board = D.get_board()
                         srv.broadcast(board)
                     time.sleep(0.5)
-                except Exception:
+                except Exception as e:  # Background pipe broadcaster loop: keep alive
+                    logger.debug("Pipe broadcaster error: %s", e)
                     time.sleep(1.0)
 
         t = threading.Thread(target=_worker, daemon=True, name="PipeBroadcasterThread")
         t.start()
-    except Exception:
-        pass
+    except (OSError, RuntimeError) as e:
+        logger.debug("Failed to start pipe broadcaster: %s", e)
 
 
 def main():
+    with contextlib.suppress(AttributeError, OSError, ValueError):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     C.track_tick()
     start_pipe_broadcaster()
     srv = HTTPServer((HOST, PORT), H)
-    print("Dota 2 Live HUD 2.0 запущен: http://%s:%d" % (HOST, PORT), flush=True)
+    print(f"Dota 2 Live HUD 2.0 запущен: http://{HOST}:{PORT}", flush=True)
     print("Открой в браузере. Разведка лобби и смурф-радар активны.", flush=True)
     try:
         srv.serve_forever()

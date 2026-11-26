@@ -1,9 +1,13 @@
 """dota_core часть 1: конфиг, HTTP, GSI. Stdlib-only."""
+import http.client
 import json
+import logging
 import os
 import time
-import urllib.request
 import urllib.error
+import urllib.request
+
+logger = logging.getLogger(__name__)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE, "config.json")
@@ -31,8 +35,8 @@ def load_config():
             cfg.update(json.load(f) or {})
     except FileNotFoundError:
         save_config(cfg)
-    except Exception:
-        pass
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as e:
+        logger.debug("Failed to load config: %s", e)
     return cfg
 
 
@@ -45,7 +49,7 @@ def load_coach():
     try:
         with open(COACH_PATH, encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except (OSError, json.JSONDecodeError, ValueError):
         return {"timings": [], "pick_advice": {}, "item_guides": {}}
 
 
@@ -61,11 +65,11 @@ def http_get_json(url, timeout=15):
     except urllib.error.HTTPError as e:
         try:
             body = e.read().decode("utf-8", "replace")[:400]
-        except Exception:
+        except (OSError, http.client.HTTPException, AttributeError, ValueError):
             body = ""
-        return None, "HTTP %d: %s" % (e.code, body)
-    except Exception as e:
-        return None, "сеть: %s" % e
+        return None, f"HTTP {e.code}: {body}"
+    except (urllib.error.URLError, http.client.HTTPException, OSError, json.JSONDecodeError, ValueError) as e:
+        return None, f"сеть: {e}"
 
 
 def need_account():
@@ -82,9 +86,10 @@ def fmt_match(m):
     if "player_slot" in m and "radiant_win" in m:
         is_rad = m["player_slot"] < 128
         res = "WIN" if (m["radiant_win"] == is_rad) else "LOSS"
-    return "%s | hero %s | %d/%d/%d | %s" % (
-        m.get("match_id", "?"), hero, m.get("kills", 0),
-        m.get("deaths", 0), m.get("assists", 0), res)
+    kills = int(m.get("kills", 0) or 0)
+    deaths = int(m.get("deaths", 0) or 0)
+    assists = int(m.get("assists", 0) or 0)
+    return f"{m.get('match_id', '?')} | hero {hero} | {kills}/{deaths}/{assists} | {res}"
 
 
 def gsi_read():
@@ -95,7 +100,7 @@ def gsi_read():
         return data, age, None
     except FileNotFoundError:
         return None, -1, "GSI-данных нет: запусти gsi_server.py и зайди в матч."
-    except Exception as e:
+    except (OSError, json.JSONDecodeError, TypeError, ValueError, AttributeError) as e:
         return None, -1, str(e)
 
 
@@ -116,7 +121,7 @@ def gsi_summary(data, age):
         "герой": hero.get("name", "?"),
         "hp": hero.get("health"), "max_hp": hero.get("max_health"),
         "mp": hero.get("mana"), "max_mp": hero.get("max_mana"),
-        "kda": "%s/%s/%s" % (player.get("kills", "?"), player.get("deaths", "?"), player.get("assists", "?")),
+        "kda": f"{player.get('kills', '?')}/{player.get('deaths', '?')}/{player.get('assists', '?')}",
         "gpm": player.get("gold_per_min"), "xpm": player.get("xp_per_min"),
         "золото": player.get("gold"),
         "время_сек": mp.get("clock_time", mp.get("game_time", "?")),
@@ -126,7 +131,7 @@ def gsi_summary(data, age):
     # --- spectator max-info ---
     out["spectator"] = bool(is_spect)
     out["match_id"] = mp.get("matchid")
-    out["счёт"] = "%s:%s" % (mp.get("radiant_score", "?"), mp.get("dire_score", "?"))
+    out["счёт"] = f"{mp.get('radiant_score', '?')}:{mp.get('dire_score', '?')}"
     out["день"] = mp.get("daytime")
     out["пауза"] = mp.get("paused")
     out["победа"] = mp.get("win_team")
@@ -142,17 +147,17 @@ def gsi_summary(data, age):
                 for k in sorted(t.keys()):
                     v = t[k]
                     if isinstance(v, dict) and v.get("hero_id", 0) > 0:
-                        picks.append("%s:%s" % (k, v.get("hero_name") or v.get("hero_id")))
+                        picks.append(f"{k}:{v.get('hero_name') or v.get('hero_id')}")
             if picks:
                 out["драфт_пики"] = picks[:12]
-        except Exception:
-            pass
+        except (AttributeError, TypeError, ValueError) as e:
+            logger.debug("Failed to parse GSI draft: %s", e)
     # buildings: count alive towers per team
     try:
         alive_r = alive_d = 0
         for side in ("radiant", "dire"):
             b = buildings.get(side) or {}
-            for k, v in b.items():
+            for v in b.values():
                 if isinstance(v, dict):
                     hp = v.get("health")
                     if hp is None or (isinstance(hp, int) and hp > 0):
@@ -161,28 +166,27 @@ def gsi_summary(data, age):
         if buildings:
             out["здания_жив_radiant"] = alive_r
             out["здания_жив_dire"] = alive_d
-    except Exception:
-        pass
+    except (AttributeError, TypeError) as e:
+        logger.debug("Failed to parse GSI buildings: %s", e)
     # last events human-readable (kills / buybacks / rosh)
     try:
         last = []
         for e in (events or [])[-6:]:
             et = e.get("event_type")
             if et in ("killer", "kill"):
-                last.append("kill %s->%s" % (e.get("killer"), e.get("victim")))
+                last.append(f"kill {e.get('killer')}->{e.get('victim')}")
             elif et == "generic_event":
-                import json as _j
                 try:
-                    d = _j.loads(e.get("data", "{}"))
-                    last.append("%s p%s" % (d.get("type"), d.get("playerid1")))
-                except Exception:
+                    d = json.loads(e.get("data", "{}"))
+                    last.append(f"{d.get('type')} p{d.get('playerid1')}")
+                except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
                     last.append("event")
             else:
                 last.append(str(et))
         if last:
             out["последние_события"] = last
-    except Exception:
-        pass
+    except (AttributeError, TypeError, KeyError) as e:
+        logger.debug("Failed to parse GSI events: %s", e)
     return out
 
 
@@ -196,7 +200,7 @@ def _num(v, default=None):
         if v is None or v == "?":
             return default
         return float(v)
-    except Exception:
+    except (TypeError, ValueError):
         return default
 
 
@@ -210,7 +214,7 @@ def snap_point(data):
     try:
         for side in ("radiant", "dire"):
             b = bld.get(side) or {}
-            for _, v in b.items():
+            for v in b.values():
                 if isinstance(v, dict):
                     hp = v.get("health")
                     if hp is None or (isinstance(hp, (int, float)) and hp > 0):
@@ -218,8 +222,8 @@ def snap_point(data):
                             alive_r += 1
                         else:
                             alive_d += 1
-    except Exception:
-        pass
+    except (AttributeError, TypeError) as e:
+        logger.debug("Failed to parse snap_point buildings: %s", e)
     ct = mp.get("clock_time", mp.get("game_time"))
     return {
         "t": time.time(),
@@ -256,7 +260,7 @@ def load_hist():
         with open(HIST_PATH, encoding="utf-8") as f:
             h = json.load(f) or []
         return h if isinstance(h, list) else []
-    except Exception:
+    except (OSError, json.JSONDecodeError, ValueError):
         return []
 
 
@@ -265,8 +269,8 @@ def save_hist(h):
         h = (h or [])[-720:]  # ~1 час при опросе каждые 5 сек
         with open(HIST_PATH, "w", encoding="utf-8") as f:
             json.dump(h, f, ensure_ascii=False)
-    except Exception:
-        pass
+    except (OSError, TypeError, ValueError) as e:
+        logger.debug("Failed to save history: %s", e)
 
 
 def track_tick(max_age_min=60):
@@ -306,7 +310,7 @@ def _rate(new, old, dt_min):
         return None
     try:
         return round((float(new) - float(old)) / dt_min, 1)
-    except Exception:
+    except (TypeError, ValueError, ZeroDivisionError):
         return None
 
 
@@ -323,7 +327,7 @@ def deltas(h, windows=(60, 300)):
         dt = (float(cur.get("t", 0)) - float(base.get("t", 0))) / 60.0
         if dt < 0.05:
             continue
-        tag = "%dсек" % w if w < 120 else "%dмин" % (w // 60)
+        tag = f"{w}сек" if w < 120 else f"{w // 60}мин"
         d = {}
         g = _rate(cur.get("gold"), base.get("gold"), dt)
         if g is not None:
@@ -351,6 +355,6 @@ def deltas(h, windows=(60, 300)):
         if fg is not None and cur.get("gpm_gsi") is not None:
             out["gpm_gsi_сейчас"] = cur.get("gpm_gsi")
             out["gpm_факт_vs_gsi"] = round(float(fg) - float(cur["gpm_gsi"]), 1)
-    except Exception:
-        pass
+    except (TypeError, ValueError, AttributeError) as e:
+        logger.debug("Failed to compare fact GPM vs GSI: %s", e)
     return out

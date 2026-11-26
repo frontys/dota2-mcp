@@ -1,10 +1,13 @@
 """GSI-приёмник: Dota 2 шлёт сюда POST с состоянием игры. Stdlib-only."""
 
 import json
+import logging
 import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+logger = logging.getLogger(__name__)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(BASE, "gsi_latest.json")
@@ -16,8 +19,8 @@ try:
         _cfg = json.load(f)
     PORT = int(_cfg.get("gsi_port", 3000))
     HOST = _cfg.get("gsi_host", "127.0.0.1")
-except Exception:
-    pass
+except (OSError, json.JSONDecodeError, TypeError, ValueError, AttributeError) as e:
+    logger.debug("Using default GSI config: %s", e)
 
 _lock = threading.Lock()
 _last_seen = {"ts": 0.0}
@@ -63,7 +66,7 @@ class Handler(BaseHTTPRequestHandler):
                         "reason": "пока нет данных: зайди в матч и убедись что gsi_server.py запущен",
                     },
                 )
-            except Exception as e:
+            except (OSError, json.JSONDecodeError, ValueError) as e:
                 self._send(500, {"ok": False, "error": str(e)})
         else:
             self._send(404, {"ok": False})
@@ -72,11 +75,14 @@ class Handler(BaseHTTPRequestHandler):
         if len(self.path) > 200:
             self._send(404, {"ok": False})
             return
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = max(0, int(self.headers.get("Content-Length") or 0))
+        except ValueError:
+            length = 0
         raw = self.rfile.read(length) if length > 0 else b"{}"
         try:
             payload = json.loads(raw.decode("utf-8", "replace") or "{}")
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             payload = {"_raw_error": "bad json"}
         payload["_received_at"] = time.time()
         try:
@@ -88,8 +94,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 import voice_coach
                 voice_coach.coach.process_gsi_packet(payload)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("voice_coach GSI hook error: %s", e)
 
             # Реактивное оповещение C# WPF оверлея по Named Pipe (<1 мс)
             try:
@@ -99,8 +105,8 @@ class Handler(BaseHTTPRequestHandler):
                 srv = pipe_server.get_pipe_server()
                 if srv.is_connected():
                     srv.broadcast(D.get_board())
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("pipe_server GSI hook error: %s", e)
 
             self._send(200, {"ok": True})
         except Exception as e:
@@ -109,8 +115,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     srv = HTTPServer((HOST, PORT), Handler)
-    print("Dota2 MCP GSI слушаю http://%s:%d" % (HOST, PORT))
-    print("Статус: http://%s:%d/status" % (HOST, PORT))
+    print(f"Dota2 MCP GSI слушаю http://{HOST}:{PORT}")
+    print(f"Статус: http://{HOST}:{PORT}/status")
     print("Оставь окно открытым во время игры. Ctrl+C — остановить.")
     try:
         srv.serve_forever()

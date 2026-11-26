@@ -1,6 +1,7 @@
 """Инструменты ч.1: запуск, GSI, аккаунт, OpenDota-профиль."""
 import os
 import subprocess
+
 import dota_core as C
 
 
@@ -11,15 +12,17 @@ def t_launch(mode="normal", hero=None):
             if os.path.exists(c):
                 steam = c
                 break
+    if not steam:
+        return {"ok": False, "error": "не смог запустить Steam: steam.exe не найден"}
     try:
         subprocess.Popen([steam, "-applaunch", "570"])
         msg = "Dota 2 запускается через Steam."
-    except Exception as e:
-        return {"ok": False, "error": "не смог запустить Steam: %s" % e}
+    except (OSError, ValueError, TypeError) as e:
+        return {"ok": False, "error": f"не смог запустить Steam: {e}"}
     if mode == "training":
         msg += " Тренировка: Играть -> Тренировка с ботами -> сложность -> Начать."
     elif hero:
-        msg += " Потренируй %s в лобби с ботами или демо." % hero
+        msg += f" Потренируй {hero} в лобби с ботами или демо."
     return {"ok": True, "message": msg}
 
 
@@ -45,19 +48,19 @@ def t_gsi_install():
     done, failed = [], []
     for root in C.CFG.get("dota_installs") or []:
         if not os.path.exists(root):
-            failed.append("%s (нет папки)" % root)
+            failed.append(f"{root} (нет папки)")
             continue
         try:
             done.append(install_gsi.install_to(root, port))
-        except Exception as e:
-            failed.append("%s: %s" % (root, e))
+        except (OSError, ValueError) as e:
+            failed.append(f"{root}: {e}")
     return {"ok": bool(done), "installed": done, "failed": failed}
 
 
 def t_set_account(account_id):
     try:
         acc = int(account_id)
-    except Exception:
+    except (TypeError, ValueError):
         return {"ok": False, "error": "account_id должен быть числом"}
     C.CFG["account_id"] = acc
     C.save_config(C.CFG)
@@ -69,11 +72,11 @@ def t_profile():
     if err:
         return {"ok": False, "error": err}
     base = C.CFG.get("opendota_base")
-    prof, e1 = C.http_get_json("%s/players/%s" % (base, acc))
-    wl, _ = C.http_get_json("%s/players/%s/wl" % (base, acc))
-    heroes, _ = C.http_get_json("%s/players/%s/heroes" % (base, acc))
+    prof, e1 = C.http_get_json(f"{base}/players/{acc}")
+    wl, _ = C.http_get_json(f"{base}/players/{acc}/wl")
+    heroes, _ = C.http_get_json(f"{base}/players/{acc}/heroes")
     if e1 and not prof:
-        return {"ok": False, "error": "OpenDota: %s" % e1}
+        return {"ok": False, "error": f"OpenDota: {e1}"}
     out = {"ok": True, "account_id": acc}
     if prof:
         out["ник"] = (prof.get("profile") or {}).get("personaname")

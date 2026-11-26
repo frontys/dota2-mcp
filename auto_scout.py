@@ -8,15 +8,15 @@
 """
 import concurrent.futures
 import ctypes
-import io
+import http.client
 import json
+import logging
 import os
-import re
 import sys
 import threading
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 if BASE not in sys.path:
@@ -24,6 +24,8 @@ if BASE not in sys.path:
 
 import dota_core as C
 import scout_engine
+
+logger = logging.getLogger(__name__)
 
 
 class AutoScoutManager:
@@ -80,8 +82,8 @@ class AutoScoutManager:
                 self._check_console_log()
                 self._sync_opendota_live()
                 self._scout_unscouted_players()
-            except Exception:
-                pass
+            except Exception as e:  # Daemon loop boundary: keep sniffer thread alive
+                logger.debug("AutoScout worker error: %s", e)
             time.sleep(1.5)
 
     def _get_clipboard_text(self):
@@ -116,7 +118,7 @@ class AutoScoutManager:
                     kernel32.GlobalUnlock(h)
             finally:
                 user32.CloseClipboard()
-        except Exception:
+        except (OSError, ctypes.ArgumentError, AttributeError, ValueError, TypeError):
             return ""
 
     def _check_clipboard(self):
@@ -171,8 +173,8 @@ class AutoScoutManager:
                                 "team": "unassigned",
                                 "source": "console_log",
                             }
-        except Exception:
-            pass
+        except (OSError, ValueError, TypeError) as e:
+            logger.debug("Failed to scan console.log: %s", e)
 
     def update_from_gsi(self, data):
         """Парсит входящий пакет GSI (allplayers, player, map, draft)."""
@@ -199,7 +201,7 @@ class AutoScoutManager:
             if self_aid_raw:
                 try:
                     self.self_account_id = int(self_aid_raw)
-                    self.self_team = pl.get("team_name", "unknown").lower()
+                    self.self_team = (pl.get("team_name") or "unknown").lower()
                     if self.self_account_id not in self.players_meta:
                         self.players_meta[self.self_account_id] = {
                             "account_id": self.self_account_id,
@@ -208,24 +210,26 @@ class AutoScoutManager:
                             "slot": pl.get("player_slot"),
                             "source": "gsi_player",
                         }
-                except Exception:
-                    pass
+                except (TypeError, ValueError, AttributeError) as e:
+                    logger.debug("Failed to parse GSI self player: %s", e)
 
             # Парсинг секции allplayers
             allp = data.get("allplayers")
             if isinstance(allp, dict):
-                # Формат 1: {"team2": {"player0": {...}}, "team3": {"player5": {...}}}
                 for team_key, team_dict in allp.items():
-                    if isinstance(team_dict, dict) and any(k.startswith("player") for k in team_dict.keys()):
+                    if not isinstance(team_dict, dict):
+                        continue
+                    if team_key.startswith("player"):
+                        # Формат 2: плоский {"player0": {...}, "player1": {...}}
+                        self._ingest_player_dict(team_dict)
+                    elif any(k.startswith("player") and isinstance(v, dict) for k, v in team_dict.items()):
+                        # Формат 1: {"team2": {"player0": {...}}, "team3": {"player5": {...}}}
                         t_name = "radiant" if team_key in ("team2", "radiant") else (
                             "dire" if team_key in ("team3", "dire") else "unassigned"
                         )
-                        for p_key, p_info in team_dict.items():
+                        for p_info in team_dict.values():
                             if isinstance(p_info, dict):
                                 self._ingest_player_dict(p_info, default_team=t_name)
-                    elif team_key.startswith("player") and isinstance(team_dict, dict):
-                        # Формат 2: плоский {"player0": {...}, "player1": {...}}
-                        self._ingest_player_dict(team_dict)
 
     def _ingest_player_dict(self, p_info, default_team="unassigned"):
         """Регистрирует одного игрока из словаря GSI."""
@@ -240,23 +244,30 @@ class AutoScoutManager:
                 aid = aid_num - 76561197960265728
             else:
                 aid = aid_num
-        except Exception:
+        except (TypeError, ValueError):
             return
 
         if not aid:
             return
 
-        team = p_info.get("team_name", default_team).lower()
+        team = (p_info.get("team_name") or default_team).lower()
         if team not in ("radiant", "dire"):
-            slot = p_info.get("player_slot") or p_info.get("team_slot")
-            if slot is not None:
-                team = "radiant" if int(slot) < 5 or int(slot) < 128 else "dire"
+            pslot = p_info.get("player_slot")
+            if pslot is not None:
+                try:
+                    team = "radiant" if int(pslot) < 5 else "dire"
+                except (TypeError, ValueError):
+                    pass
+
+        slot = p_info.get("player_slot")
+        if slot is None:
+            slot = p_info.get("team_slot")
 
         meta = self.players_meta.get(aid, {})
         meta["account_id"] = aid
-        meta["name"] = p_info.get("name") or meta.get("name") or ("Player_%d" % aid)
+        meta["name"] = p_info.get("name") or meta.get("name") or f"Player_{aid}"
         meta["team"] = team
-        meta["slot"] = p_info.get("player_slot") or p_info.get("team_slot") or meta.get("slot")
+        meta["slot"] = slot if slot is not None else meta.get("slot")
 
         hid = p_info.get("hero_id")
         if hid:
@@ -277,9 +288,12 @@ class AutoScoutManager:
             return
 
         # Если уже есть 10 игроков с командами, часто спамить не нужно
-        if len(self.players_meta) >= 10 and all(p.get("team") in ("radiant", "dire") for p in self.players_meta.values()):
-            if now - self.last_opendota_fetch < 60.0:
-                return
+        if (
+            len(self.players_meta) >= 10
+            and all(p.get("team") in ("radiant", "dire") for p in self.players_meta.values())
+            and now - self.last_opendota_fetch < 60.0
+        ):
+            return
 
         self.last_opendota_fetch = now
 
@@ -323,8 +337,16 @@ class AutoScoutManager:
                         meta["hero_name"] = scout_engine.HEROES_MAP.get(int(hid), str(hid))
                     meta["source"] = "opendota_live"
                     self.players_meta[aid] = meta
-        except Exception:
-            pass
+        except (
+            urllib.error.URLError,
+            http.client.HTTPException,
+            OSError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            AttributeError,
+        ) as e:
+            logger.debug("OpenDota /live sync failed: %s", e)
 
     def _scout_unscouted_players(self):
         """Параллельно сканирует игроков, по которым еще нет досье."""
@@ -431,7 +453,7 @@ class AutoScoutManager:
                 "summary": {
                     "enemy_smurfs_detected": enemy_smurfs,
                     "threat_level": "DANGER" if enemy_smurfs >= 2 else ("WARNING" if enemy_smurfs == 1 else "NORMAL"),
-                    "suggested_bans": sorted(list(suggested_bans)),
+                    "suggested_bans": sorted(suggested_bans),
                     "all_threats": all_threats,
                 },
             }
@@ -441,12 +463,14 @@ class AutoScoutManager:
         st = self.get_lobby_state()
         lines = []
         lines.append("══════════════════════════════════════════════════════════════════════════")
-        lines.append("🛡️ РАДАР ЛОББИ: СОЮЗНИКИ vs ПРОТИВНИКИ (Матч: %s | Стадия: %s)" % (st["match_id"], st["stage"]))
+        lines.append(f"🛡️ РАДАР ЛОББИ: СОЮЗНИКИ vs ПРОТИВНИКИ (Матч: {st['match_id']} | Стадия: {st['stage']})")
         lines.append("══════════════════════════════════════════════════════════════════════════")
 
         s = st.get("summary", {})
         if s.get("enemy_smurfs_detected", 0) > 0:
-            lines.append("🚨 ВНИМАНИЕ: Во вражеской команде обнаружено подозрительных игроков: %d!" % s["enemy_smurfs_detected"])
+            lines.append(
+                f"🚨 ВНИМАНИЕ: Во вражеской команде обнаружено подозрительных игроков: {s['enemy_smurfs_detected']}!"
+            )
         if s.get("suggested_bans"):
             lines.append("💡 РЕКОМЕНДАЦИИ ПО БАНАМ: " + " | ".join(s["suggested_bans"]))
 
@@ -458,38 +482,40 @@ class AutoScoutManager:
             plist = st.get(t_name, [])
             if not plist:
                 continue
-            lines.append("\n%s %s (%d игроков):" % (emoji, title, len(plist)))
+            lines.append(f"\n{emoji} {title} ({len(plist)} игроков):")
             lines.append("──────────────────────────────────────────────────────────────────────────")
             for i, p in enumerate(plist, 1):
                 is_you = " [ТЫ]" if p.get("is_you") else ""
                 v = p.get("smurf_verdict") or {}
                 badge = v.get("badge", "⏳ Сканирование")
                 r_name = p.get("rank_name", "Rank ?")
-                h_picked = (" (Герой: %s)" % p.get("hero_name")) if p.get("hero_name") else ""
-                lines.append("%d. %s [%s] (ID: %s)%s%s — %s" % (
-                    i, p.get("name", "Player"), r_name, p["account_id"], is_you, h_picked, badge
-                ))
+                h_picked = f" (Герой: {p.get('hero_name')})" if p.get("hero_name") else ""
+                lines.append(
+                    f"{i}. {p.get('name', 'Player')} [{r_name}] (ID: {p['account_id']}){is_you}{h_picked} — {badge}"
+                )
 
                 summ = p.get("recent_summary")
                 if summ:
-                    lines.append("   Форма: %dW - %dL (%0.1f%% WR) | KDA: %.2f | GPM: %d" % (
-                        summ.get("wins", 0), summ.get("losses", 0), summ.get("winrate_pct", 0),
-                        summ.get("avg_kda", 0), summ.get("avg_gpm", 0)
-                    ))
+                    wins = int(summ.get("wins", 0) or 0)
+                    losses = int(summ.get("losses", 0) or 0)
+                    wr = summ.get("winrate_pct", 0)
+                    kda = summ.get("avg_kda", 0)
+                    gpm = int(summ.get("avg_gpm", 0) or 0)
+                    lines.append(f"   Форма: {wins}W - {losses}L ({wr:.1f}% WR) | KDA: {kda:.2f} | GPM: {gpm}")
 
                 h_chips = []
                 for h in p.get("recent_heroes", [])[:3]:
                     fire = "🔥 " if h.get("is_smurf_hero") else ""
-                    h_chips.append("%s%s (%d игр, %0.0f%% WR)" % (fire, h["hero_name"], h["games"], h["winrate_pct"]))
+                    h_chips.append(f"{fire}{h['hero_name']} ({int(h['games'])} игр, {h['winrate_pct']:.0f}% WR)")
                 if h_chips:
                     lines.append("   Пул: " + ", ".join(h_chips))
 
                 if v.get("triggers"):
                     for tr in v["triggers"]:
-                        lines.append("   ⚠️ %s" % tr)
+                        lines.append(f"   ⚠️ {tr}")
                 if v.get("tips"):
                     for tp in v["tips"]:
-                        lines.append("   💡 Совет: %s" % tp)
+                        lines.append(f"   💡 Совет: {tp}")
 
         lines.append("══════════════════════════════════════════════════════════════════════════")
         return "\n".join(lines)

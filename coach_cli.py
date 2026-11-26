@@ -4,20 +4,18 @@
          scout [id...], profile, recent [N], match <id>, live, watch [сек],
          hero <hero_id>, launch [training], account <id>, quit
 """
-import io
-import sys
-try:
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace")
-except Exception:
-    pass
+import contextlib
+import json
 import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sys
+import time
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+if BASE not in sys.path:
+    sys.path.insert(0, BASE)
+import dota_core as C
 import dota_tools_a as A
 import dota_tools_b as B
-import dota_core as C
-import json
-import time
 
 HELP = """Команды:
   gsi                  - живое состояние игры (нужен gsi_server.py + матч)
@@ -38,35 +36,35 @@ HELP = """Команды:
 
 LIVE_N = 5  # интервал watch по умолчанию
 
-FmtMin = lambda s: "%d:%02d" % (int(s or 0) // 60, int(s or 0) % 60)
+FmtMin = lambda s: f"{int(s or 0) // 60}:{int(s or 0) % 60:02d}"
 
 
 def fmt_tick(t):
     """Компактная строка тика для watch: время, золото, темп, счёт."""
     if not t.get("ok"):
-        return "LIVE нет: %s" % t.get("error")
+        return f"LIVE нет: {t.get('error')}"
     cur = t.get("сейчас") or {}
     tempo = t.get("темп") or {}
     s = t.get("summary") or {}
     m1 = (tempo.get("60сек") or {})
     m5 = (tempo.get("5мин") or {})
     parts = []
-    parts.append("[%s]" % FmtMin(cur.get("game_time", s.get("время_сек", 0))))
-    parts.append("золото %s" % cur.get("gold"))
+    parts.append(f"[{FmtMin(cur.get('game_time', s.get('время_сек', 0)))}]")
+    parts.append(f"золото {cur.get('gold')}")
     if "золото_в_мин_факт" in m1:
-        parts.append("темп1м %+d/мин" % m1["золото_в_мин_факт"])
+        parts.append(f"темп1м {int(m1['золото_в_мин_факт']):+d}/мин")
     if "золото_в_мин_факт" in m5:
-        parts.append("темп5м %+d/мин" % m5["золото_в_мин_факт"])
+        parts.append(f"темп5м {int(m5['золото_в_мин_факт']):+d}/мин")
     if cur.get("gpm_gsi") is not None:
-        parts.append("gpm_gsi %s" % cur.get("gpm_gsi"))
+        parts.append(f"gpm_gsi {cur.get('gpm_gsi')}")
     for k in ("kills_дельта", "deaths_дельта", "lh_дельта"):
         if k in m5:
-            parts.append("%s %+.0f/5м" % (k.replace("_дельта", ""), m5[k]))
-    parts.append("счёт %s:%s" % (cur.get("radiant_score", "?"), cur.get("dire_score", "?")))
+            parts.append(f"{k.replace('_дельта', '')} {m5[k]:+.0f}/5м")
+    parts.append(f"счёт {cur.get('radiant_score', '?')}:{cur.get('dire_score', '?')}")
     if t.get("вердикт"):
         parts.append("| " + t["вердикт"])
     if not t.get("fresh"):
-        parts.append("(STALE-пакет %.0fс)" % (s.get("возраст_пакета_сек", -1)))
+        parts.append(f"(STALE-пакет {s.get('возраст_пакета_сек', -1):.0f}с)")
     return " ".join(str(p) for p in parts)
 
 
@@ -77,11 +75,10 @@ def cmd_watch(interval=LIVE_N, once=False):
     """Живой трекер: каждые N сек тик с дельтами."""
     try:
         interval = max(2, min(int(interval), 60))
-    except Exception:
+    except (TypeError, ValueError):
         interval = LIVE_N
-    print("LIVE-трекер: тик каждые %d сек. Ctrl+C — выйти." % interval)
+    print(f"LIVE-трекер: тик каждые {interval} сек. Ctrl+C — выйти.")
     try:
-        import time as _t
         while True:
             t = B.t_live_tick()
             print(fmt_tick(t))
@@ -89,11 +86,14 @@ def cmd_watch(interval=LIVE_N, once=False):
                 show(t)
                 break
             # раз в ~30 сек полный JSON чтобы не спамить, иначе строка
-            _t.sleep(interval)
+            time.sleep(interval)
     except KeyboardInterrupt:
         print("Вышел из LIVE.")
 
 def main():
+    with contextlib.suppress(AttributeError, OSError, ValueError):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     print("Dota2 тренер. Введи help. Выйти: quit.")
     if not C.CFG.get("account_id"):
         print("Подсказка: узнай account_id на opendota.com и введи: account 123456789")
